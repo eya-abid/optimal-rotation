@@ -85,20 +85,25 @@ def create_gif(intermediate_rotations, A, B, filename='intermediate_rotations.gi
         images.append(image)
 
     imageio.mimsave(filename, images, fps=5)
+    
+def generate_elliptical_cloud(mean, cov, num_points):
+    points = np.random.multivariate_normal(mean, cov, num_points)
+    return torch.tensor(points, dtype=torch.float32)
 
 def run(quiet=True):
-    x, y = 10, 3
+    num_points = 10
+    dim = 3
 
-    A = np.random.normal(size=(x, y, y))
-    B = np.random.normal(size=(x, y, y))
+    mean_A = np.zeros(dim)
+    mean_B = np.ones(dim)
+    cov_A = np.eye(dim) * 0.5
+    cov_B = np.eye(dim) * 0.5
 
-    print(f"A shape: {A.shape}, B shape: {B.shape}")
+    A = np.array([generate_elliptical_cloud(mean_A, cov_A, dim) for _ in range(num_points)])
+    B = np.array([generate_elliptical_cloud(mean_B, cov_B, dim) for _ in range(num_points)])
 
-    alpha = np.random.rand(x)
-    alpha /= alpha.sum()
-
-    beta = np.random.rand(y)
-    beta /= beta.sum()
+    alpha = np.random.dirichlet(np.ones(num_points), size=1)[0]
+    beta = np.random.dirichlet(np.ones(dim), size=1)[0]
 
     print(f"Alpha: {alpha}, Sum: {alpha.sum()}")
     print(f"Beta: {beta}, Sum: {beta.sum()}")
@@ -106,7 +111,7 @@ def run(quiet=True):
     intermediate_rotations = []
     intermediate_losses = []
 
-    manifold = SpecialOrthogonalGroup(y, k=x)
+    manifold = SpecialOrthogonalGroup(dim, k=num_points)
     cost, euclidean_gradient = create_cost_and_derivates(manifold, A, B, alpha, beta, intermediate_rotations, intermediate_losses)
     problem = pymanopt.Problem(manifold, cost, euclidean_gradient=euclidean_gradient)
 
@@ -126,6 +131,6 @@ if __name__ == "__main__":
     X, intermediate_rotations, intermediate_losses, A, B = run(quiet=False)
     print(f"Number of intermediate rotations saved: {len(intermediate_rotations)}")
     print(f"Number of intermediate losses saved: {len(intermediate_losses)}")
-    plot_losses(intermediate_losses, filename='loss_plot.png')
+    plot_losses(intermediate_losses, filename='loss_plot_SteepestDescent.png')
     create_gif(intermediate_rotations, A, B)
 
