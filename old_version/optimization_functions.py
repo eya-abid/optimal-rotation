@@ -125,4 +125,4 @@ def optimize_rotation_multiple_angles_lbfgs(lr, num_steps, x, initial_angles, us
                 R.copy_(U @ V.t())
         all_loss_values.append((angle, loss_values))
         all_rotations_and_predictions.append((angle, rotations_and_predictions))
-    return all_loss_values
+    return all_loss_values, all_rotations_and_predictions

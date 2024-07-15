@@ -2,13 +2,13 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
-from IPython.display import Image
 import plotly.graph_objs as go
 import plotly.io as pio
 import numpy as np
 import imageio
+from mpl_toolkits.mplot3d import Axes3D
+from IPython.display import Image
 from matplotlib.animation import FuncAnimation
 from data_generation import x, alpha_normalized, beta_normalized
 from optimization_functions import optimize_rotation, optimize_rotation_lbfgs, optimize_rotation_multiple_angles, optimize_rotation_multiple_angles_lbfgs
