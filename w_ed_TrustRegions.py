@@ -1,19 +1,39 @@
 import torch
-import pymanopt
-from pymanopt.manifolds import SpecialOrthogonalGroup
-from pymanopt.optimizers import TrustRegions
 import numpy as np
-import matplotlib.pyplot as plt
+import pymanopt
 import imageio
+import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from pymanopt.manifolds import SpecialOrthogonalGroup
 
-def pairwise_distances(x, y):
-    n, m = x.size(0), y.size(0)
-    xx = torch.sum(x ** 2, dim=1, keepdim=True).expand(n, m)
-    yy = torch.sum(y ** 2, dim=1, keepdim=True).expand(m, n).t()
-    dist = xx + yy - 2 * torch.mm(x, y.t())
-    dist = torch.clamp(dist, min=1e-12)
-    return torch.sqrt(dist)
+
+
+
+def create_cost_and_derivates(manifold, A, B, alpha, beta, intermediate_rotations, intermediate_losses):
+    A_ = torch.from_numpy(A).float()
+    B_ = torch.from_numpy(B).float()
+    alpha_ = torch.from_numpy(alpha).float()
+    beta_ = torch.from_numpy(beta).float()
+
+    @pymanopt.function.pytorch(manifold)
+    def cost(X):
+        # Reshape X to have the correct shape for rotation matrices
+        X_ = X.view(A_.shape[0], A_.shape[1], A_.shape[1]).float()
+        total_cost = 0.0
+
+        for a, b, x in zip(A_, B_, X_):
+            # Apply rotation matrix x to a
+            a_rotated = a @ x  # Rotate the points in a
+            total_cost += weighted_energy_distance(a_rotated, b, alpha_, beta_)
+        
+        intermediate_rotations.append(X_.detach().clone().numpy())
+        intermediate_losses.append(total_cost.item())
+        return total_cost
+
+    return cost, None
+
+
+
 
 def weighted_energy_distance(x, y, alpha, beta):
     d_xy = pairwise_distances(x, y)
@@ -30,24 +50,54 @@ def weighted_energy_distance(x, y, alpha, beta):
     energy_dist = 2 * e_xy - e_xx - e_yy
     return energy_dist
 
-def create_cost_and_derivates(manifold, A, B, alpha, beta, intermediate_rotations, intermediate_losses):
-    A_ = torch.from_numpy(A).float()
-    B_ = torch.from_numpy(B).float()
-    alpha_ = torch.from_numpy(alpha).float()
-    beta_ = torch.from_numpy(beta).float()
 
-    @pymanopt.function.pytorch(manifold)
-    def cost(X):
-        X_ = X.view(A_.shape[0], A_.shape[1], A_.shape[2]).float()
-        total_cost = 0.0
-        for a, b, x in zip(A_, B_, X_):
-            a_rotated = x @ a
-            total_cost += weighted_energy_distance(a_rotated, b, alpha_, beta_)
-        intermediate_rotations.append(X_.detach().clone().numpy())
-        intermediate_losses.append(total_cost.item())
-        return total_cost
 
-    return cost, None
+
+def pairwise_distances(x, y):
+    n, m = x.size(0), y.size(0)
+    xx = torch.sum(x ** 2, dim=1, keepdim=True).expand(n, m)
+    yy = torch.sum(y ** 2, dim=1, keepdim=True).expand(m, n).t()
+    dist = xx + yy - 2 * torch.mm(x, y.t())
+    dist = torch.clamp(dist, min=1e-12)
+    return torch.sqrt(dist)
+
+
+
+
+def run():
+    num_points = 100
+    dim = 3
+
+    mean_A = np.zeros(dim)
+    mean_B = np.ones(dim)
+    cov_A = np.eye(dim) * 0.5
+    cov_B = np.eye(dim) * 0.5
+
+    A = np.array([generate_elliptical_cloud(mean_A, cov_A, dim).numpy() for _ in range(num_points)])
+    B = np.array([generate_elliptical_cloud(mean_B, cov_B, dim).numpy() for _ in range(num_points)])
+
+    alpha = np.random.dirichlet(np.ones(num_points), size=1)[0]
+    beta = np.random.dirichlet(np.ones(dim), size=1)[0]
+
+    intermediate_rotations = []
+    intermediate_losses = []
+
+    manifold = SpecialOrthogonalGroup(dim, k=num_points)
+    cost, euclidean_gradient = create_cost_and_derivates(manifold, A, B, alpha, beta, intermediate_rotations, intermediate_losses)
+    problem = pymanopt.Problem(manifold, cost, euclidean_gradient=euclidean_gradient)
+
+    optimizer = pymanopt.optimizers.TrustRegions(verbosity=2)
+    X = optimizer.run(problem).point
+
+    print(f"X shape: {X.shape}")
+    print(f"Number of intermediate rotations saved: {len(intermediate_rotations)}")
+    print(f"Number of intermediate losses saved: {len(intermediate_losses)}")
+
+    plot_losses(intermediate_losses, filename='loss_plot_TrustRegions.png')
+    create_gif(intermediate_rotations, A, B, filename='intermediate_rotations_TrustRegions.gif')
+
+
+
 
 def plot_losses(intermediate_losses, filename='loss_plot.png'):
     plt.figure(figsize=(10, 6))
@@ -60,74 +110,43 @@ def plot_losses(intermediate_losses, filename='loss_plot.png'):
     plt.savefig(filename)
     plt.show()
 
-def create_gif(intermediate_rotations, A, B, filename='intermediate_rotations.gif'):
+
+
+
+def create_gif(intermediate_rotations, A, B, filename='intermediate_rotations_TrustRegions.gif'):
     images = []
     fig = plt.figure(figsize=(10, 7))
     ax = fig.add_subplot(111, projection='3d')
 
-    for X_ in intermediate_rotations:
+    for i, X_ in enumerate(intermediate_rotations):
         ax.clear()
         X_ = torch.from_numpy(X_).float()
         A_ = torch.from_numpy(A).float()
         B_ = torch.from_numpy(B).float()
         for a, b, x in zip(A_, B_, X_):
-            a_rotated = x @ a
+            a_rotated = a @ x  # Apply the rotation
             ax.scatter(a_rotated[:, 0], a_rotated[:, 1], a_rotated[:, 2], c='r', marker='o')
             ax.scatter(b[:, 0], b[:, 1], b[:, 2], c='g', marker='^')
         ax.set_xlim([-3, 3])
         ax.set_ylim([-3, 3])
         ax.set_zlim([-3, 3])
-        ax.set_title('Intermediate Rotations')
+        ax.set_title(f'Intermediate Rotations - Frame {i+1}')
         plt.draw()
-
+        fig.canvas.draw()
         image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8').reshape(fig.canvas.get_width_height()[::-1] + (3,))
         images.append(image)
 
     imageio.mimsave(filename, images, fps=5)
 
+
+
+
 def generate_elliptical_cloud(mean, cov, num_points):
     points = np.random.multivariate_normal(mean, cov, num_points)
     return torch.tensor(points, dtype=torch.float32)
 
-def run(quiet=True):
-    num_points = 10
-    dim = 3
 
-    mean_A = np.zeros(dim)
-    mean_B = np.ones(dim)
-    cov_A = np.eye(dim) * 0.5
-    cov_B = np.eye(dim) * 0.5
 
-    A = np.array([generate_elliptical_cloud(mean_A, cov_A, dim) for _ in range(num_points)])
-    B = np.array([generate_elliptical_cloud(mean_B, cov_B, dim) for _ in range(num_points)])
-
-    alpha = np.random.dirichlet(np.ones(num_points), size=1)[0]
-    beta = np.random.dirichlet(np.ones(dim), size=1)[0]
-
-    print(f"A shape: {A.shape}, B shape: {B.shape}")
-    print(f"Alpha: {alpha}, Sum: {np.sum(alpha)}")
-    print(f"Beta: {beta}, Sum: {np.sum(beta)}")
-
-    intermediate_rotations = []
-    intermediate_losses = []
-
-    manifold = SpecialOrthogonalGroup(dim, k=num_points)
-    cost, euclidean_gradient = create_cost_and_derivates(manifold, A, B, alpha, beta, intermediate_rotations, intermediate_losses)
-    problem = pymanopt.Problem(manifold, cost, euclidean_gradient=euclidean_gradient)
-
-    optimizer = TrustRegions(verbosity=2 * int(not quiet))
-    X = optimizer.run(problem).point
-
-    print(f"X shape: {X.shape}")
-
-    if not quiet:
-        print("Optimized Rotation Matrix:\n", X)
-
-    return X, intermediate_rotations, intermediate_losses, A, B, alpha, beta
 
 if __name__ == "__main__":
-    X, intermediate_rotations, intermediate_losses, A, B, alpha, beta = run(quiet=False)
-    print(f"Number of intermediate rotations saved: {len(intermediate_rotations)}")
-    print(f"Number of intermediate losses saved: {len(intermediate_losses)}")
-    plot_losses(intermediate_losses, filename='loss_plot_TrustRegions.png')
-    create_gif(intermediate_rotations, A, B, filename='intermediate_rotations_TrustRegions.gif')
+    run()
