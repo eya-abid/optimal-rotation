@@ -58,6 +58,7 @@ def plot_distances(angles, energy_distances, sinkhorn_distances, gaussian_distan
     plt.title('Distances Between x and Rotated x')
     plt.legend()
     plt.grid(True)
+    plt.savefig('many_angles.png')
     plt.show()
 
 def main():
