@@ -8,6 +8,8 @@ import imageio
 from mpl_toolkits.mplot3d import Axes3D
 from geomloss import SamplesLoss
 import os
+import pyvista as pv
+
 
 def geom_energy_distance(x, y):
     loss = SamplesLoss("energy")
@@ -24,7 +26,6 @@ def geom_gaussian_distance(x, y, epsilon=0.01, p=2):
 def create_cost_and_derivates(manifold, A, B, distance_type, intermediate_rotations, intermediate_losses):
     A_ = torch.from_numpy(A).float()
     B_ = torch.from_numpy(B).float()
-
     @pymanopt.function.pytorch(manifold)
     def cost(X):
         X_ = X.view(A_.shape[0], A_.shape[2], A_.shape[2]).float()
@@ -40,7 +41,6 @@ def create_cost_and_derivates(manifold, A, B, distance_type, intermediate_rotati
         intermediate_rotations.append(X_.detach().clone().numpy())
         intermediate_losses.append(total_cost.item())
         return total_cost
-
     return cost, None
 
 def plot_losses(intermediate_losses, filename='loss_plot.png'):
@@ -53,7 +53,24 @@ def plot_losses(intermediate_losses, filename='loss_plot.png'):
     plt.grid(True)
     plt.savefig(filename)
     plt.show()
+
     
+def visualize_point_cloud(cloud, title="Point Cloud Visualization", color="red"):
+    # Create a PyVista plotter for this point cloud
+    plotter = pv.Plotter()
+
+    # Ensure the cloud is in the correct 3D shape and add it to the plotter
+    for sub_cloud in cloud:
+        plotter.add_points(sub_cloud, color=color, point_size=10, label=title)
+    
+    # Add grid and labels
+    plotter.add_legend()
+    plotter.show_grid()
+
+    # Set plot title and show
+    plotter.view_isometric()
+    plotter.show(title=title)
+
 
 def create_gif(intermediate_rotations, A, B, filename='intermediate_rotations_ConjugateGradient.gif'):
     images = []
@@ -81,7 +98,6 @@ def create_gif(intermediate_rotations, A, B, filename='intermediate_rotations_Co
     imageio.mimsave(filename, images, fps=5)
     
     
-
 def generate_elliptical_cloud(mean, cov, num_points):
     points = np.random.multivariate_normal(mean, cov, num_points)
     return torch.tensor(points, dtype=torch.float32)
@@ -102,11 +118,16 @@ def run(distance_type, quiet=True):
     # A = A - A.mean(0) (moyenne sur les colomnes) ===> A = A - np.mean(A, axis=0)
     
     # Centering the point clouds A and B around the origin
+    
     A_centered = A - np.mean(A, axis=(1, 0), keepdims=True)
     B_centered = B - np.mean(B, axis=(1, 0), keepdims=True)
 
 
     print(f"A shape: {A.shape}, B shape: {B.shape}")
+    print("Visualizing Point Cloud A...")
+    visualize_point_cloud(A, title=f"Point Cloud A", color="red")
+    print("Visualizing Point Cloud B...")
+    visualize_point_cloud(B, title=f"Point Cloud B", color="green")
 
     intermediate_rotations = []
     intermediate_losses = []
@@ -133,3 +154,13 @@ if __name__ == "__main__":
         print(f"Number of intermediate losses saved: {len(intermediate_losses)}")
         plot_losses(intermediate_losses, filename=f'loss_plot_50_pts_CG_{distance_type}.png')
 #        create_gif(intermediate_rotations, A, B, filename=f'intermediate_rotations_20_pts_SD_{distance_type}.gif')
+
+
+"""if __name__ == "__main__":
+    # Example usage after running the optimization
+    for distance_type in ["energy", "sinkhorn", "gaussian"]:
+        print(f"Running optimization for {distance_type} distance")
+        X, intermediate_rotations, intermediate_losses, A, B = run(distance_type, quiet=False)
+        
+        # Visualize the point clouds with rotations
+        visualize_point_clouds(A, B, rotations=intermediate_rotations, title=f"Visualization of {distance_type} distance")"""
