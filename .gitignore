@@ -1,0 +1,10 @@
+.git
+*.pyc
+__pycache__/
+venv/
+env/
+*.tmp
+*.log
+config.ini
+credentials.json
+rot10/
