@@ -3,8 +3,11 @@
 __pycache__/
 venv/
 env/
+data/raw_data.csv
+data/large_dataset/
 *.tmp
 *.log
 config.ini
 credentials.json
 rot10/
+MDSPACE_tuto-Data/
