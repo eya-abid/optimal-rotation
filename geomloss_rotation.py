@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import imageio
 import nibabel as nib
+import matplotlib.cm as cm
 from scipy.interpolate import griddata
 from mpl_toolkits.mplot3d import Axes3D
 from geomloss import SamplesLoss
@@ -14,6 +15,9 @@ from pymanopt.manifolds import SpecialOrthogonalGroup
 from pymanopt.optimizers import ConjugateGradient
 from pymanopt.optimizers import SteepestDescent
 from pymanopt.optimizers import TrustRegions
+
+pv.global_theme.allow_empty_mesh = True
+
 
 
 
@@ -31,7 +35,7 @@ def geom_gaussian_distance(x, y, epsilon=0.5, p=2):
 
 
 
-def create_cost_and_derivates(manifold, A, B, distance_type, intermediate_rotations, intermediate_losses):
+def create_cost_and_derivates(manifold, A, B, distance_type, intermediate_rotations, intermediate_losses, intermediate_rotation_vectors):
     A_ = torch.from_numpy(A).float()  # Shape (num_points, 3)
     B_ = torch.from_numpy(B).float()  # Shape (num_points, 3)
     
@@ -60,6 +64,8 @@ def create_cost_and_derivates(manifold, A, B, distance_type, intermediate_rotati
 
         # Append the rotation and loss for later tracking
         intermediate_rotations.append(X_.detach().clone().numpy())
+        rotation_vector = rotation_matrix_to_rotation_vector(X_.detach().clone().numpy()) 
+        intermediate_rotation_vectors.append(rotation_vector)
         intermediate_losses.append(total_cost.item())
         
         return total_cost
@@ -438,7 +444,45 @@ def run_pymanopt_rotation_experiment_phase_1(experience_index=20, optimizer_name
         print(f"Number of intermediate losses saved: {len(intermediate_losses)}")
 
 
-def generate_energy_landscape(A, B, distance_type, num_samples=1001, N=100):
+def run_arrow(distance_type, experience_index, optimizer_name, A, B, quiet=True):
+    """
+    Run the optimization experiment with the given distance type, using the same A and B point clouds.
+    """
+    num_points = A.shape[0]  # Use the number of points from A
+    dim = A.shape[1]  # Dimensionality should be 3
+
+    # Correct folder structure: optimizer_name/distance_type/exp{experience_index}/vtks
+    folder = f"{optimizer_name}/{distance_type}/exp{experience_index}"
+    os.makedirs(folder, exist_ok=True)
+
+    # Visualize ellipsoids
+    mesh_A = create_ellipsoid_mesh(A)
+    mesh_B = create_ellipsoid_mesh(B)
+    visualize_ellipsoid_mesh(mesh_A, mesh_B)
+
+    print(f"A.shape: {A.shape}, B.shape: {B.shape}")
+
+    intermediate_rotations = []
+    intermediate_rotation_vectors = []  # Store rotation vectors
+    intermediate_losses = []
+
+    # Define the SO(3) manifold
+    manifold = SpecialOrthogonalGroup(dim, k=1)
+    cost, euclidean_gradient = create_cost_and_derivates(
+        manifold, A, B, distance_type, intermediate_rotations, intermediate_losses, intermediate_rotation_vectors
+    )
+    problem = pymanopt.Problem(manifold, cost, euclidean_gradient=euclidean_gradient)
+
+    optimizer = ConjugateGradient(verbosity=2 * int(not quiet))
+
+    X = optimizer.run(problem).point
+
+    print(f"X shape: {X.shape}")
+
+    return X, intermediate_rotations, intermediate_rotation_vectors, intermediate_losses
+
+
+def generate_energy_landscape(A, B, distance_type, num_samples=1001, N=150):
     """
     Generates the energy landscape data for the given point clouds and distance type.
 
@@ -473,7 +517,7 @@ def generate_energy_landscape(A, B, distance_type, num_samples=1001, N=100):
     manifold = SpecialOrthogonalGroup(3, k=1)  # Define the manifold here
     for rot_vec in rot_vecs:
         R = rotation_vector_to_rotation_matrix(rot_vec)
-        cost, _ = create_cost_and_derivates(manifold, A, B, distance_type, [], [])
+        cost, _ = create_cost_and_derivates(manifold, A, B, distance_type, [], [], [])
         costs.append(cost(R).item())  # Evaluate the cost function
 
     # Interpolate the costs to the full grid using griddata
@@ -485,22 +529,15 @@ def generate_energy_landscape(A, B, distance_type, num_samples=1001, N=100):
     return img_sphere
 
 
-def visualize_energy_landscape(img_sphere, N=100):
-    """
-    Visualizes the energy landscape data using PyVista.
-
-    Args:
-        img_sphere: 3D array containing the energy landscape data.
-        N: Resolution of the 3D grid.
-    """
+def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N=150):
 
     # Create a volumetric rendering of img
     grid = pv.ImageData(
         dimensions=img_sphere.shape,
         origin=(-np.pi, -np.pi, -np.pi),
-        spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),)
-        
-    grid.point_data["img"] = img_sphere.flatten(order="F")  # Flatten the image to a 1D array
+        spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),
+    )
+    grid.point_data["img"] = img_sphere.flatten(order="F")
 
     # Create a PyVista plotter
     pl = pv.Plotter()
@@ -518,8 +555,9 @@ def visualize_energy_landscape(img_sphere, N=100):
     sphere_surface = pv.Sphere(
         center=(0, 0, 0), radius=np.pi, theta_resolution=100, phi_resolution=100
     )
-    # contours = contours.boolean_intersection(sphere_b)
 
+
+    # Add the sphere first to ensure it's rendered on top
     pl.add_mesh(
         contours,
         opacity=.3,
@@ -530,22 +568,77 @@ def visualize_energy_landscape(img_sphere, N=100):
         show_scalar_bar=True,
         scalar_bar_args=dict(vertical=True),
     )
-    if True:
-        pl.add_mesh(
+    #if True:
+    pl.add_mesh(
             sphere_surface,
             color="black",
-            opacity=.1,
+            opacity=.2, #.2,
             culling="front",
             interpolation="pbr",
             roughness=1,
         )
 
+    # Normalize and scale the rotation vectors
+    radius = np.pi  # Radius of the sphere
+    num_rotations = len(intermediate_rotation_vectors)
+    #colormap = cm.get_cmap("Reds")  # Use a red colormap
+    colormap = plt.get_cmap("Reds")  # Use plt.get_cmap() to get the colormap
+    #normalized_rot_vecs = [radius * vec / np.linalg.norm(vec) for vec in intermediate_rotation_vectors]
+
+    """for i in range(1, num_rotations):
+        start_point = tuple(normalized_rot_vecs[i-1])  # Convert to tuple
+        end_point = tuple(normalized_rot_vecs[i])  # Convert to tuple
+
+        # Create a line connecting the two points
+        #line = pv.Line(start_point, end_point)
+        #spline = pv.Spline(points=[start_point, end_point], n_points=50)  # Adjust n_points for smoothness
+        #tube = pv.Tube(pointa=start_point, pointb=end_point, radius=0.5)  # Adjust radius as needed
+        #arrow = pv.Arrow(start=start_point, direction=np.array(end_point) - np.array(start_point), tip_length=0.3, tip_radius=0.1, shaft_radius=0.05)
+        #cylinder = pv.Cylinder(center=(start_point + end_point) / 2, direction=np.array(end_point) - np.array(start_point), radius=0.05, height=np.linalg.norm(np.array(end_point) - np.array(start_point)))
+        #glyph = pv.Cone(direction=np.array(end_point) - np.array(start_point), height=0.2, radius=0.1)
+        #glyph.translate((np.array(start_point) + np.array(end_point)) / 2)
+
+
+
+        # Calculate color based on the position in the trajectory
+        color = [i / num_rotations, 0, 1 - i / num_rotations]  # Transition from red to blue
+
+        # Add the line to the plotter with the calculated color
+        #pl.add_mesh(line, color=color, line_width=3)
+        #pl.add_mesh(spline, color=color, line_width=3)
+        #pl.add_mesh(tube, color=color)
+        #pl.add_mesh(arrow, color=color)
+        #pl.add_mesh(cylinder, color=color)
+        #pl.add_mesh(glyph, color=color)"""
+
+    for i, rot_vec in enumerate(intermediate_rotation_vectors):
+
+        color_index = i / (num_rotations - 1)  # Normalize index to [0, 1]
+
+        # Get color from colormap
+        color = colormap(color_index)[:3]  # Get RGB values from colormap
+
+        # Calculate color based on the position in the trajectory
+        #color = [i / num_rotations, 0, 1 - i / num_rotations]  # Transition from red to blue
+
+        # Add a point (sphere) with the calculated color
+        #pl.add_mesh(pv.Sphere(radius=0.08, center=rot_vec), color=color)  # Adjust radius as needed
+        pl.add_mesh(pv.Sphere(radius=0.1, center=rot_vec), color=color, opacity=1.0)  
+
+
+
+
     pl.enable_ssao(radius=15, bias=0.5)
     pl.enable_anti_aliasing("ssaa")
+    #pl.camera.position = (5, 5, 5)  # Example camera position
     pl.camera.zoom(1.1)
+    pl.save_graphic("energy_landscape.svg")
     pl.show()
 
-if __name__ == "__main__":
+
+
+
+"""if __name__ == "__main__":
 
     # Test the conversion functions
     test_matrix = np.array([[0.707, -0.707, 0],
@@ -558,20 +651,23 @@ if __name__ == "__main__":
 
     # Convert rotation vector back to rotation matrix
     reconstructed_matrix = rotation_vector_to_rotation_matrix(test_vector)
-    print(f"Reconstructed matrix:\n{reconstructed_matrix}")
+    print(f"Reconstructed matrix:\n{reconstructed_matrix}")"""
 
 
 if __name__ == "__main__":
 
+    experience_index = 35
+    optimizer_name = "ConjugateGradient"
     dim = 3
     mean_A = np.zeros(dim)
     cov_A = np.diag([1.0, 1.0, 1.0])  # Ellipsoid with different variances along each axis
-    points_A = generate_elliptical_cloud(mean_A, cov_A, 100)
+    points_A = generate_elliptical_cloud(mean_A, cov_A, 50)
     points_A[:, 0] = points_A[:, 0] * 2
     A = points_A.numpy()  # Shape is (num_points, 3)
 
     manifold = SpecialOrthogonalGroup(dim, k=1)
-    X_initial = manifold.random_point()  # Random initial 3x3 rotation matrix
+    #X_initial = manifold.random_point()  # Random initial 3x3 rotation matrix
+    X_initial = np.eye(3)  # Identity matrix
     print(f"Initial rotation matrix:\n{X_initial}")
 
     # Step 3: Apply the rotation to A to get B_rotated
@@ -579,11 +675,18 @@ if __name__ == "__main__":
 
 
     # Generate the energy landscape data
-    distance_type = "energy"  # or "sinkhorn" or "energy"
+    distance_type = "gaussian"  # or "sinkhorn" or "energy"
     img_sphere = generate_energy_landscape(A, B, distance_type)
 
-    # Visualize the energy landscape
-    visualize_energy_landscape(img_sphere)
+    # Run the optimization (make sure this is done BEFORE visualizing)
+    X, intermediate_rotations, intermediate_rotation_vectors, intermediate_losses = run_arrow(
+        distance_type, experience_index, optimizer_name, A, B, quiet=False
+    )
+
+    print(intermediate_rotation_vectors)
+
+    # Visualize the energy landscape with arrows
+    visualize_energy_landscape(img_sphere, intermediate_rotation_vectors)
     
 
 
