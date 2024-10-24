@@ -19,8 +19,6 @@ from pymanopt.optimizers import TrustRegions
 pv.global_theme.allow_empty_mesh = True
 
 
-
-
 def geom_energy_distance(x, y):
     loss = SamplesLoss("energy")
     return loss(x, y)
@@ -42,7 +40,7 @@ def create_cost_and_derivates(manifold, A, B, distance_type, intermediate_rotati
     @pymanopt.function.pytorch(manifold)
     def cost(X):
         # Print the shape of X during optimization
-        print(f"Shape of X: {X.shape}")
+        #print(f"Shape of X: {X.shape}")
         
         if X.shape == (3, 3):  # Single 3x3 rotation matrix
             X_ = X.float()
@@ -132,13 +130,11 @@ def plot_losses(intermediate_losses, filename='loss_plot.png'):
     plt.show()
 
 
-
 def generate_elliptical_cloud(mean, cov, num_points):
     points = np.random.multivariate_normal(mean, cov, num_points)
     norms = np.sqrt(np.sum(points**2, axis=1))
     points = points/(norms).reshape(num_points,1)
     return torch.tensor(points, dtype=torch.float32)
-
 
 
 def create_ellipsoid_mesh(point_cloud):
@@ -159,7 +155,6 @@ def create_ellipsoid_mesh(point_cloud):
     return pv.PolyData(point_cloud)
 
     
-
 def visualize_ellipsoid_mesh(mesh_A, mesh_B, title_A="Ellipsoid A", title_B="Ellipsoid B"):
     """
     Visualize the ellipsoid point clouds using PyVista.
@@ -173,7 +168,6 @@ def visualize_ellipsoid_mesh(mesh_A, mesh_B, title_A="Ellipsoid A", title_B="Ell
     plotter.add_mesh(mesh_A, color="red", render_points_as_spheres=True, point_size=10)
     plotter.set_background('white')
     plotter.add_light(pv.Light(position=(5, 5, 5), intensity=0.8))
-    #plotter.enable_shadows()
     plotter.add_text(title_A, font_size=12)
     plotter.view_isometric()
 
@@ -182,7 +176,6 @@ def visualize_ellipsoid_mesh(mesh_A, mesh_B, title_A="Ellipsoid A", title_B="Ell
     plotter.add_mesh(mesh_B, color="green", render_points_as_spheres=True, point_size=10)
     plotter.set_background('white')
     plotter.add_light(pv.Light(position=(5, 5, 5), intensity=0.8))
-    #plotter.enable_shadows()
     plotter.add_text(title_B, font_size=12)
     plotter.view_isometric()
 
@@ -220,14 +213,7 @@ def create_vtk_files_with_rotations(intermediate_rotations, A, B, base_filename=
 
 
 def save_vtk_files(A, rotation_index, base_filename='ellipsoid_rotation', folder='vtk', is_static_B=False):
-    """
-    Save the rotated point cloud A as VTK file, and B only once as static.
-    :param A: Rotated point cloud for ellipsoid A.
-    :param rotation_index: Index of the rotation step, used for naming the VTK files.
-    :param base_filename: Base name to use for saving the files (default is 'ellipsoid_rotation').
-    :param folder: Folder where the VTK files will be saved.
-    :param is_static_B: Boolean flag to indicate if this is the static B ellipsoid.
-    """
+
     # Create the 'vtks' subfolder inside the main folder
     vtk_folder = os.path.join(folder, 'vtks')
     os.makedirs(vtk_folder, exist_ok=True)  # Ensure the 'vtks' subfolder exists
@@ -292,15 +278,6 @@ def create_gif(intermediate_rotations, A, B, filename='ellipsoid_rotation.gif'):
     
 
 def run(distance_type, experience_index, optimizer_name, A, B, quiet=True):
-    """
-    Run the optimization experiment with the given distance type, using the same A and B point clouds.
-    :param distance_type: Distance measure to use (e.g., "energy", "sinkhorn", "gaussian").
-    :param experience_index: The experiment index.
-    :param optimizer_name: The optimizer name (e.g., "ConjugateGradient").
-    :param A: Point cloud for ellipsoid A.
-    :param B: Point cloud for ellipsoid B.
-    :param quiet: Whether to suppress optimizer output.
-    """
     num_points = A.shape[0]  # Use the number of points from A
     dim = A.shape[1]  # Dimensionality should be 3
 
@@ -326,7 +303,7 @@ def run(distance_type, experience_index, optimizer_name, A, B, quiet=True):
     optimizer = ConjugateGradient(verbosity=2 * int(not quiet))
     X = optimizer.run(problem).point
 
-    print(f"X shape: {X.shape}")
+    #print(f"X shape: {X.shape}")
 
     # Save the loss plot in the correct folder
     plot_losses(intermediate_losses, filename=os.path.join(folder, f'loss_plot_{distance_type}.png'))
@@ -460,7 +437,7 @@ def run_arrow(distance_type, experience_index, optimizer_name, A, B, quiet=True)
     mesh_B = create_ellipsoid_mesh(B)
     visualize_ellipsoid_mesh(mesh_A, mesh_B)
 
-    print(f"A.shape: {A.shape}, B.shape: {B.shape}")
+    #print(f"A.shape: {A.shape}, B.shape: {B.shape}")
 
     intermediate_rotations = []
     intermediate_rotation_vectors = []  # Store rotation vectors
@@ -477,7 +454,7 @@ def run_arrow(distance_type, experience_index, optimizer_name, A, B, quiet=True)
 
     X = optimizer.run(problem).point
 
-    print(f"X shape: {X.shape}")
+    #print(f"X shape: {X.shape}")
 
     return X, intermediate_rotations, intermediate_rotation_vectors, intermediate_losses
 
@@ -529,7 +506,7 @@ def generate_energy_landscape(A, B, distance_type, num_samples=1001, N=150):
     return img_sphere
 
 
-def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N=150):
+"""def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N=150):
 
     # Create a volumetric rendering of img
     grid = pv.ImageData(
@@ -560,7 +537,7 @@ def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N=150)
     # Add the sphere first to ensure it's rendered on top
     pl.add_mesh(
         contours,
-        opacity=.3,
+        opacity=.1,
         cmap="RdBu",
         ambient=0.2,
         diffuse=1,
@@ -572,7 +549,7 @@ def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N=150)
     pl.add_mesh(
             sphere_surface,
             color="black",
-            opacity=.2, #.2,
+            opacity=.1, #.2,
             culling="front",
             interpolation="pbr",
             roughness=1,
@@ -582,60 +559,229 @@ def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N=150)
     radius = np.pi  # Radius of the sphere
     num_rotations = len(intermediate_rotation_vectors)
     #colormap = cm.get_cmap("Reds")  # Use a red colormap
-    colormap = plt.get_cmap("Reds")  # Use plt.get_cmap() to get the colormap
+    #colormap = plt.get_cmap("Greys")  # Use plt.get_cmap() to get the colormap
+    colormap = plt.get_cmap("viridis")  # Use a high-contrast colormap
     #normalized_rot_vecs = [radius * vec / np.linalg.norm(vec) for vec in intermediate_rotation_vectors]
-
-    """for i in range(1, num_rotations):
-        start_point = tuple(normalized_rot_vecs[i-1])  # Convert to tuple
-        end_point = tuple(normalized_rot_vecs[i])  # Convert to tuple
-
-        # Create a line connecting the two points
-        #line = pv.Line(start_point, end_point)
-        #spline = pv.Spline(points=[start_point, end_point], n_points=50)  # Adjust n_points for smoothness
-        #tube = pv.Tube(pointa=start_point, pointb=end_point, radius=0.5)  # Adjust radius as needed
-        #arrow = pv.Arrow(start=start_point, direction=np.array(end_point) - np.array(start_point), tip_length=0.3, tip_radius=0.1, shaft_radius=0.05)
-        #cylinder = pv.Cylinder(center=(start_point + end_point) / 2, direction=np.array(end_point) - np.array(start_point), radius=0.05, height=np.linalg.norm(np.array(end_point) - np.array(start_point)))
-        #glyph = pv.Cone(direction=np.array(end_point) - np.array(start_point), height=0.2, radius=0.1)
-        #glyph.translate((np.array(start_point) + np.array(end_point)) / 2)
-
-
-
-        # Calculate color based on the position in the trajectory
-        color = [i / num_rotations, 0, 1 - i / num_rotations]  # Transition from red to blue
-
-        # Add the line to the plotter with the calculated color
-        #pl.add_mesh(line, color=color, line_width=3)
-        #pl.add_mesh(spline, color=color, line_width=3)
-        #pl.add_mesh(tube, color=color)
-        #pl.add_mesh(arrow, color=color)
-        #pl.add_mesh(cylinder, color=color)
-        #pl.add_mesh(glyph, color=color)"""
 
     for i, rot_vec in enumerate(intermediate_rotation_vectors):
 
-        color_index = i / (num_rotations - 1)  # Normalize index to [0, 1]
-
-        # Get color from colormap
+        #color_index = i / (num_rotations - 1)  # Normalize index to [0, 1]
+        color_index = np.linalg.norm(rot_vec) / radius  # Distance from center
         color = colormap(color_index)[:3]  # Get RGB values from colormap
+        pl.add_mesh(pv.Sphere(radius=0.1, center=rot_vec), color=color, opacity=1.0)
+
+        # Add an arrow showing direction from one point to the next
+        if i < num_rotations - 1:
+            next_rot_vec = intermediate_rotation_vectors[i + 1]
+            line = pv.Line(rot_vec, next_rot_vec)
+            pl.add_mesh(line, color="black")  # Connect with black line
+
+            #pl.add_mesh(pv.Arrow(start=rot_vec, direction=next_rot_vec - rot_vec), color=color)
+            # Add a point (sphere) with the calculated color
+            #pl.add_mesh(pv.Sphere(radius=0.1, center=rot_vec), color=color, opacity=1.0)
+
 
         # Calculate color based on the position in the trajectory
         #color = [i / num_rotations, 0, 1 - i / num_rotations]  # Transition from red to blue
 
         # Add a point (sphere) with the calculated color
         #pl.add_mesh(pv.Sphere(radius=0.08, center=rot_vec), color=color)  # Adjust radius as needed
-        pl.add_mesh(pv.Sphere(radius=0.1, center=rot_vec), color=color, opacity=1.0)  
-
-
-
+        #pl.add_mesh(pv.Sphere(radius=0.1, center=rot_vec), color=color, opacity=1.0)  
 
     pl.enable_ssao(radius=15, bias=0.5)
     pl.enable_anti_aliasing("ssaa")
-    #pl.camera.position = (5, 5, 5)  # Example camera position
+    pl.camera.zoom(1.1)
+    pl.save_graphic("energy_landscape.svg")
+    pl.show()"""
+
+def sample_directions(n_samples, random=False):
+    if random:
+        points = np.random.randn(n_samples, 3)
+        points /= np.linalg.norm(points, axis=1)[:, None]
+        return points
+    else:
+        # Fibonacci sphere
+        points = []
+        phi = np.pi * (np.sqrt(5.) - 1.)  # golden angle in radians
+        i = np.arange(n_samples)
+        y = 1 - (i / float(n_samples - 1)) * 2  # y goes from 1 to -1
+        radius = np.sqrt(1 - y * y)
+        theta = phi * i
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+        points = np.stack((x, y, z), axis=1)
+        return points
+
+def sample_angles(n_samples):
+    theta = np.arccos(1 - 2 * np.random.rand(n_samples))  # Using the correct density
+    return theta
+
+def sample_vectors(n_samples, random=False):
+    if random:
+        angles = sample_angles(n_samples)
+        directions = sample_directions(n_samples, random=random)
+        vectors = (angles[:, None] * directions).reshape(-1, 3)
+    else:
+        n_angles = int(.5 * (n_samples ** (1/3)))
+        n_directions = n_samples // n_angles
+        angles = sample_angles(n_angles)
+        directions = sample_directions(n_directions)
+        angles = angles[:, None, None]
+        directions = directions[None, :, :]
+        vectors = (angles * directions).reshape(-1, 3)
+    print(vectors.shape)
+    return vectors
+
+
+def visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N=150):
+    grid = pv.ImageData(
+        dimensions=img_sphere.shape,
+        origin=(-np.pi, -np.pi, -np.pi),
+        spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),
+    )
+    grid.point_data["img"] = img_sphere.flatten(order="F")
+    pl = pv.Plotter()
+    vmax = np.nanmax(img_sphere)
+    vmin = np.nanmin(img_sphere)
+    contours = grid.contour(
+        isosurfaces=np.linspace(vmax, vmin, 11), scalars="img", method="flying_edges"
+    )
+    contours.compute_normals(inplace=True)
+    sphere_surface = pv.Sphere(
+        center=(0, 0, 0), radius=np.pi, theta_resolution=100, phi_resolution=100
+    )
+    pl.add_mesh(
+        contours,
+        opacity=0.1,  # Adjusted opacity for better contrast
+        cmap="RdBu",
+        ambient=0.2,
+        diffuse=1,
+        interpolation="gouraud",
+        show_scalar_bar=True,
+        scalar_bar_args=dict(vertical=True),
+    )
+    pl.add_mesh(
+        sphere_surface,
+        color="black",
+        opacity=0.1,  # Adjusted opacity for better contrast
+        culling="front",
+        interpolation="pbr",
+        roughness=1,
+    )
+    num_rotations = len(intermediate_rotation_vectors)
+    colormap = plt.get_cmap("viridis")  # Use a high-contrast colormap
+
+    # Create a VTK lookup table from the colormap
+    lookup_table = vtk.vtkLookupTable()
+    lookup_table.SetNumberOfTableValues(num_rotations)
+    lookup_table.SetRange(1, num_rotations)  # Set the correct range from 1 to num_rotations
+    lookup_table.Build()
+
+    for i in range(num_rotations):
+        color = colormap(i / (num_rotations - 1))[:3]
+        lookup_table.SetTableValue(i, *color, 1.0)  # Add color to the lookup table
+
+    # Create a grid for spheres with color data based on the optimization steps
+    points = np.array(intermediate_rotation_vectors)
+    scalars = np.arange(1, num_rotations + 1)  # Starting from 1
+
+    # Add spheres with scalar colors
+    for i, point in enumerate(points):
+        scalar_value = scalars[i]
+        color = colormap((scalar_value - 1) / (num_rotations - 1))[:3]  # Get RGB values from colormap
+        sphere = pv.Sphere(radius=0.1, center=point)
+        # Add the sphere with scalar value for correct coloring
+        pl.add_mesh(sphere, color=color, opacity=1.0)
+        
+        if i < num_rotations - 1:
+            next_point = points[i + 1]
+            line = pv.Line(point, next_point)
+            pl.add_mesh(line, color="black")
+
+    # Add scalar bar
+    scalar_bar = pl.add_scalar_bar(title="Optimization Step", vertical=True, n_labels=5)
+    scalar_bar.SetLookupTable(lookup_table)
+
+    pl.enable_ssao(radius=15, bias=0.5)
+    pl.enable_anti_aliasing("ssaa")
     pl.camera.zoom(1.1)
     pl.save_graphic("energy_landscape.svg")
     pl.show()
 
+def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N=150):
+    grid = pv.ImageData(
+        dimensions=img_sphere.shape,
+        origin=(-np.pi, -np.pi, -np.pi),
+        spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),
+    )
+    grid.point_data["img"] = img_sphere.flatten(order="F")
+    pl = pv.Plotter()
+    vmax = np.nanmax(img_sphere)
+    vmin = np.nanmin(img_sphere)
+    contours = grid.contour(
+        isosurfaces=np.linspace(vmax, vmin, 11), scalars="img", method="flying_edges"
+    )
+    contours.compute_normals(inplace=True)
+    sphere_surface = pv.Sphere(
+        center=(0, 0, 0), radius=np.pi, theta_resolution=100, phi_resolution=100
+    )
+    pl.add_mesh(
+        contours,
+        opacity=0.1,  # Adjusted opacity for better contrast
+        cmap="RdBu",
+        ambient=0.2,
+        diffuse=1,
+        interpolation="gouraud",
+        show_scalar_bar=True,
+        scalar_bar_args=dict(vertical=True),
+    )
+    pl.add_mesh(
+        sphere_surface,
+        color="black",
+        opacity=0.1,  # Adjusted opacity for better contrast
+        culling="front",
+        interpolation="pbr",
+        roughness=1,
+    )
+    num_rotations = len(intermediate_rotation_vectors)
+    colormap = plt.get_cmap("viridis")  # Use a high-contrast colormap
 
+    # Create a VTK lookup table from the colormap
+    lookup_table = vtk.vtkLookupTable()
+    lookup_table.SetNumberOfTableValues(num_rotations)
+    lookup_table.SetRange(1, num_rotations)  # Set the correct range from 1 to num_rotations
+    lookup_table.Build()
+
+    for i in range(num_rotations):
+        color = colormap(i / (num_rotations - 1))[:3]
+        lookup_table.SetTableValue(i, *color, 1.0)  # Add color to the lookup table
+
+    # Create a grid for spheres with color data based on the optimization steps
+    points = np.array(intermediate_rotation_vectors)
+    scalars = np.arange(1, num_rotations + 1)  # Starting from 1
+
+    # Add spheres with scalar colors
+    for i, point in enumerate(points):
+        scalar_value = scalars[i]
+        color = colormap((scalar_value - 1) / (num_rotations - 1))[:3]  # Get RGB values from colormap
+        sphere = pv.Sphere(radius=0.1, center=point)
+        # Add the sphere with scalar value for correct coloring
+        pl.add_mesh(sphere, color=color, opacity=1.0)
+        
+        if i < num_rotations - 1:
+            next_point = points[i + 1]
+            line = pv.Line(point, next_point)
+            pl.add_mesh(line, color="black")
+
+    # Add scalar bar
+    scalar_bar = pl.add_scalar_bar(title="step", vertical=True, n_labels=5)
+    scalar_bar.SetLookupTable(lookup_table)
+
+    pl.enable_ssao(radius=15, bias=0.5)
+    pl.enable_anti_aliasing("ssaa")
+    pl.camera.zoom(1.1)
+    pl.save_graphic("energy_landscape.svg")
+    pl.show()
 
 
 """if __name__ == "__main__":
@@ -658,6 +804,10 @@ if __name__ == "__main__":
 
     experience_index = 35
     optimizer_name = "ConjugateGradient"
+    n_samples = 100  # Adjust number of samples as needed
+    #rotation_vectors = generate_rotation_vectors(n_samples, random=True)
+    rotation_vectors = sample_vectors(n_samples, random=True)
+
     dim = 3
     mean_A = np.zeros(dim)
     cov_A = np.diag([1.0, 1.0, 1.0])  # Ellipsoid with different variances along each axis
@@ -666,8 +816,8 @@ if __name__ == "__main__":
     A = points_A.numpy()  # Shape is (num_points, 3)
 
     manifold = SpecialOrthogonalGroup(dim, k=1)
-    #X_initial = manifold.random_point()  # Random initial 3x3 rotation matrix
-    X_initial = np.eye(3)  # Identity matrix
+    X_initial = manifold.random_point()  # Random initial 3x3 rotation matrix
+    #X_initial = np.eye(3)  # Identity matrix
     print(f"Initial rotation matrix:\n{X_initial}")
 
     # Step 3: Apply the rotation to A to get B_rotated
@@ -686,134 +836,5 @@ if __name__ == "__main__":
     print(intermediate_rotation_vectors)
 
     # Visualize the energy landscape with arrows
-    visualize_energy_landscape(img_sphere, intermediate_rotation_vectors)
-    
-
-
-# If you want to save the sphere in a nii file format
-"""if __name__ == "__main__":
-    experience_index = 25
-    optimizer_name = "ConjugateGradient" 
-    num_points = 100
-    dim = 3
-
-    # Step 1: The existing code to generate A and B
-    mean_A = np.zeros(dim)
-    cov_A = np.diag([1.0, 1.0, 1.0])  # Ellipsoid with different variances along each axis
-    points_A = generate_elliptical_cloud(mean_A, cov_A, num_points)
-    points_A[:, 0] = points_A[:, 0] * 2
-    A = points_A.numpy()  # Shape is (num_points, 3)
-    
-    # Step 2: Generate a random initial rotation matrix once
-    manifold = SpecialOrthogonalGroup(dim, k=1)
-    X_initial = manifold.random_point()  # Random initial 3x3 rotation matrix
-    print(f"Initial rotation matrix:\n{X_initial}")
-
-    # Step 3: Apply the rotation to A to get B_rotated
-    B = np.array([A[i] @ X_initial.T for i in range(A.shape[0])])
-    
-    # Step 4: Energy Landscape Visualization ---
-
-    # Create a 3D meshgrid of points in the cube [-pi,pi] x [-pi,pi] x [-pi,pi]
-    N = 51  # Adjust for resolution
-    x = np.linspace(-np.pi, np.pi, N)
-    y = np.linspace(-np.pi, np.pi, N)
-    z = np.linspace(-np.pi, np.pi, N)
-    X, Y, Z = np.meshgrid(x, y, z)
-
-    # Mask the sphere centered at the origin with radius pi
-    mask = X**2 + Y**2 + Z**2 <= np.pi**2
-
-    # Initialize an array to store the loss values
-    img = np.zeros_like(X, dtype=float)
-
-    # Choose your distance type
-    distance_type = "gaussian"  # or "sinkhorn" or "energy"
-
-    # Number of sample points for interpolation
-    num_samples = 1000 
-
-    # Generate random rotation vectors within the sphere
-    rot_vecs = np.random.rand(num_samples, 3) * 2 * np.pi - np.pi
-    rot_vecs = rot_vecs[np.linalg.norm(rot_vecs, axis=1) <= np.pi]
-
-    # Calculate costs for the sampled rotation vectors
-    costs = []
-    for rot_vec in rot_vecs:
-        R = rotation_vector_to_rotation_matrix(rot_vec)
-        cost, _ = create_cost_and_derivates(manifold, A, B, distance_type, [], [])  
-        costs.append(cost(R).item())  # Evaluate the cost function
-
-    # Interpolate the costs to the full grid using griddata
-    img = griddata(rot_vecs, np.array(costs), (X, Y, Z), method='linear') 
-
-    # Restrict the img to the sphere, use NaN outside of it
-    img_sphere = np.where(mask, img, np.nan)
-
-    # Save the data to a .nii file
-    affine_matrix = np.array(
-        [
-            [2 * np.pi / (N - 1), 0, 0, -np.pi],
-            [0, 2 * np.pi / (N - 1), 0, -np.pi],
-            [0, 0, 2 * np.pi / (N - 1), -np.pi],
-            [0, 0, 0, 1],
-        ]
-    )
-    nii = nib.Nifti1Image(img_sphere, affine_matrix)
-    nib.save(nii, "gaussian_sphere_1000_100.nii")
-    #nib.save(nii, "sinkhorn_sphere_1000.nii")
-    #nib.save(nii, "energy_sphere_1000.nii")
-
-
-
-
-    # Create a volumetric rendering of img
-    grid = pv.ImageData(
-        dimensions=img.shape,
-        origin=(-np.pi, -np.pi, -np.pi),
-        spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),)
-        
-    grid.point_data["img"] = img_sphere.flatten(order="F")  # Flatten the image to a 1D array
-
-    # Create a PyVista plotter
-    pl = pv.Plotter()
-
-    # Extract contours
-    vmax = np.nanmax(img)
-    vmin = np.nanmin(img)
-    contours = grid.contour(
-        isosurfaces=np.linspace(vmax, vmin, 11), scalars="img", method="flying_edges"
-    )
-    # Compute surface normals for better shading
-    contours.compute_normals(inplace=True)
-
-    # Create a sphere to intersect the contours
-    sphere_surface = pv.Sphere(
-        center=(0, 0, 0), radius=np.pi, theta_resolution=100, phi_resolution=100
-    )
-    # contours = contours.boolean_intersection(sphere_b)
-
-    pl.add_mesh(
-        contours,
-        opacity=.3,
-        cmap="RdBu",
-        ambient=0.2,
-        diffuse=1,
-        interpolation="gouraud",
-        show_scalar_bar=True,
-        scalar_bar_args=dict(vertical=True),
-    )
-    if True:
-        pl.add_mesh(
-            sphere_surface,
-            color="black",
-            opacity=.1,
-            culling="front",
-            interpolation="pbr",
-            roughness=1,
-        )
-
-    pl.enable_ssao(radius=15, bias=0.5)
-    pl.enable_anti_aliasing("ssaa")
-    pl.camera.zoom(1.1)
-    pl.show(jupyter_backend="static")"""
+    #visualize_energy_landscape(img_sphere, intermediate_rotation_vectors)
+    visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors)
