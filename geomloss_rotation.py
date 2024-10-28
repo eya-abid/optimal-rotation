@@ -116,17 +116,14 @@ def rotation_vector_to_rotation_matrix(m):
     return R
 
 
-def plot_losses(intermediate_losses, filename='loss_plot.png'):
-    plt.figure(figsize=(10, 6))
-    plt.plot(intermediate_losses, label='Loss')
-    plt.xlabel('Iteration')
+def plot_losses(intermediate_losses, title, filename):
+    plt.figure()
+    plt.plot(intermediate_losses)
+    plt.title(title)
+    plt.xlabel('Iterations')
     plt.ylabel('Loss')
-    plt.title('Intermediate Losses During Optimization')
-    plt.legend()
-    plt.grid(True)
     plt.savefig(filename)
-    plt.show()
-
+    plt.close()
 
 def generate_elliptical_cloud(mean, cov, num_points):
     points = np.random.multivariate_normal(mean, cov, num_points)
@@ -280,26 +277,36 @@ def run_optimization(distance_type, experience_index, optimizer_name, A, B, quie
     dim = A.shape[1]  # Dimensionality should be 3
     folder = f"{optimizer_name}/{distance_type}/exp{experience_index}"
     os.makedirs(folder, exist_ok=True)
-    
+
     mesh_A = create_ellipsoid_mesh(A)
     mesh_B = create_ellipsoid_mesh(B)
     visualize_ellipsoid_mesh(mesh_A, mesh_B)
     print(f"A.shape: {A.shape}, B.shape: {B.shape}")
-    
+
     intermediate_rotations = []
     intermediate_rotation_vectors = []
     intermediate_losses = []
+
     manifold = SpecialOrthogonalGroup(dim, k=1)
     cost, euclidean_gradient = create_cost_and_derivates(manifold, A, B, distance_type, intermediate_rotations, intermediate_losses, intermediate_rotation_vectors)
     problem = pymanopt.Problem(manifold, cost, euclidean_gradient=euclidean_gradient)
-    optimizer = ConjugateGradient(verbosity=2 * int(not quiet))
-    
+
+    # Dynamically select the optimizer
+    if optimizer_name == "ConjugateGradient":
+        optimizer = ConjugateGradient(verbosity=2 * int(not quiet))
+    elif optimizer_name == "SteepestDescent":
+        optimizer = SteepestDescent(verbosity=2 * int(not quiet))
+    elif optimizer_name == "TrustRegions":
+        optimizer = TrustRegions(verbosity=2 * int(not quiet))
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer_name}")
+
     # Use initial_point if provided
     if initial_point is not None:
         X = optimizer.run(problem, initial_point=initial_point).point
     else:
         X = optimizer.run(problem).point
-    
+
     print(f"X shape: {X.shape}")
     return X, intermediate_rotations, intermediate_rotation_vectors, intermediate_losses
 
@@ -451,7 +458,7 @@ def visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N):
     pl.show()
 
 
-if __name__ == "__main__":
+"""if __name__ == "__main__":
     experience_index = 35
     optimizer_name = "ConjugateGradient"
     n_samples = 2000  # Adjust number of samples as needed
@@ -479,4 +486,74 @@ if __name__ == "__main__":
     print(intermediate_rotation_vectors)
     
     # Visualize the energy landscape with arrows
-    visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N=150)
+    visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N=150)"""
+
+if __name__ == "__main__":
+    experience_index = 35
+    optimizers = ["ConjugateGradient", "TrustRegions", "SteepestDescent"]  # Add more optimizers if needed
+    distance_types = ["energy", "gaussian", "sinkhorn"]
+    epsilon_values = [0.1, 0.5, 1.0]  # Different epsilon values to test
+    n_samples = 2000  # Adjust number of samples as needed
+    rotation_vectors = sample_vectors(n_samples, random=True)
+    dim = 3
+    mean_A = np.zeros(dim)
+    cov_A = np.diag([1.0, 1.0, 1.0])
+    points_A = generate_elliptical_cloud(mean_A, cov_A, 50)
+    points_A[:, 0] = points_A[:, 0] * 2
+    A = points_A.numpy()
+    B = A.copy()  # Ensure the optimum is centered
+
+    manifold = SpecialOrthogonalGroup(dim, k=1)
+    X_initial = manifold.random_point()
+    print(f"Initial rotation matrix:\n{X_initial}")
+
+    def create_cost_and_derivates(manifold, A, B, distance_func, intermediate_rotations, intermediate_losses, intermediate_rotation_vectors):
+        A_ = torch.from_numpy(A).float()
+        B_ = torch.from_numpy(B).float()
+
+        @pymanopt.function.pytorch(manifold)
+        def cost(X):
+            X_ = X.float() if X.shape == (3, 3) else ValueError(f"Unexpected shape for X: {X.shape}")
+
+            A_rotated = A_ @ X_.T
+            total_cost = distance_func(A_rotated, B_)
+
+            intermediate_rotations.append(X_.detach().clone().numpy())
+            rotation_vector = rotation_matrix_to_rotation_vector(X_.detach().clone().numpy())
+            intermediate_rotation_vectors.append(rotation_vector)
+            intermediate_losses.append(total_cost.item())
+
+            return total_cost
+
+        return cost, None
+
+    for distance_type in distance_types:
+        for epsilon in epsilon_values:
+            for optimizer_name in optimizers:
+                directory = f"results/{optimizer_name}/{distance_type}/epsilon_{epsilon}/"
+                os.makedirs(directory, exist_ok=True)
+
+                if distance_type == "energy":
+                    distance_func = geom_energy_distance
+                elif distance_type == "sinkhorn":
+                    distance_func = lambda x, y: geom_sinkhorn_distance(x, y, epsilon=epsilon)
+                elif distance_type == "gaussian":
+                    distance_func = lambda x, y: geom_gaussian_distance(x, y, epsilon=epsilon)
+
+                img_sphere = generate_energy_landscape(A, B, distance_func, rotation_vectors)
+                
+                X, intermediate_rotations, intermediate_rotation_vectors, intermediate_losses = run_optimization(
+                    distance_func, experience_index, optimizer_name, A, B, quiet=False, initial_point=X_initial
+                )
+                print(intermediate_rotation_vectors)
+
+                # Save the loss plot
+                title = f'{distance_type.capitalize()} with {optimizer_name}, epsilon={epsilon}'
+                loss_plot_filename = f'{directory}{distance_type}_{optimizer_name}_epsilon_{epsilon}_loss.png'
+                plot_losses(intermediate_losses, title, loss_plot_filename)
+
+                # Visualize and save the energy landscape with arrows
+                visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N=150)
+                svg_filename = f'{directory}{distance_type}_{optimizer_name}_epsilon_{epsilon}_landscape.svg'
+                plt.savefig(svg_filename)
+
