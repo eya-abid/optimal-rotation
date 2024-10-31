@@ -15,6 +15,7 @@ from pymanopt.manifolds import SpecialOrthogonalGroup
 from pymanopt.optimizers import ConjugateGradient
 from pymanopt.optimizers import SteepestDescent
 from pymanopt.optimizers import TrustRegions
+import Bio.PDB
 
 pv.global_theme.allow_empty_mesh = True
 
@@ -458,6 +459,21 @@ def visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N):
     pl.show()
 
 
+def get_atom_coordinates(pdb_file):
+    parser = Bio.PDB.PDBParser()
+    structure = parser.get_structure('protein', pdb_file)
+    atoms = []
+
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                for atom in residue:
+                    if atom.element != 'H':  # Exclude hydrogen atoms
+                        atoms.append(atom.coord)
+    
+    return np.array(atoms)
+
+
 """if __name__ == "__main__":
     experience_index = 35
     optimizer_name = "ConjugateGradient"
@@ -489,18 +505,25 @@ def visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N):
     visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N=150)"""
 
 if __name__ == "__main__":
-    experience_index = 35
+    experience_index = 36
     optimizers = ["ConjugateGradient", "TrustRegions", "SteepestDescent"]  # Add more optimizers if needed
     distance_types = ["energy", "gaussian", "sinkhorn"]
     epsilon_values = [0.1, 0.5, 1.0]  # Different epsilon values to test
     n_samples = 2000  # Adjust number of samples as needed
     rotation_vectors = sample_vectors(n_samples, random=True)
     dim = 3
-    mean_A = np.zeros(dim)
+
+
+    pdb_file = "./MDSPACE_tuto-Data/AK.pdb"
+    atoms = get_atom_coordinates(pdb_file)
+    point_cloud = atoms
+    A = point_cloud
+
+    """mean_A = np.zeros(dim)
     cov_A = np.diag([1.0, 1.0, 1.0])
     points_A = generate_elliptical_cloud(mean_A, cov_A, 50)
     points_A[:, 0] = points_A[:, 0] * 2
-    A = points_A.numpy()
+    A = points_A.numpy()"""
     B = A.copy()  # Ensure the optimum is centered
 
     manifold = SpecialOrthogonalGroup(dim, k=1)
@@ -530,7 +553,7 @@ if __name__ == "__main__":
     for distance_type in distance_types:
         for epsilon in epsilon_values:
             for optimizer_name in optimizers:
-                directory = f"results/{optimizer_name}/{distance_type}/epsilon_{epsilon}/"
+                directory = f"results_bio/{optimizer_name}/{distance_type}/epsilon_{epsilon}/"
                 os.makedirs(directory, exist_ok=True)
 
                 if distance_type == "energy":
