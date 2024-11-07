@@ -19,16 +19,19 @@ import Bio.PDB
 
 pv.global_theme.allow_empty_mesh = True
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+print(f"Using device: {device}")
+
 
 def geom_energy_distance(x, y):
     loss = SamplesLoss("energy")
     return loss(x, y)
 
-def geom_sinkhorn_distance(x, y, epsilon=0.5, p=2):
+def geom_sinkhorn_distance(x, y, epsilon=0.01, p=2):
     loss = SamplesLoss("sinkhorn", blur=epsilon, p=p)
     return loss(x, y)
 
-def geom_gaussian_distance(x, y, epsilon=0.5, p=2):
+def geom_gaussian_distance(x, y, epsilon=0.01, p=2):
     loss = SamplesLoss("gaussian", blur=epsilon)
     return loss(x, y)
 
@@ -117,13 +120,20 @@ def rotation_vector_to_rotation_matrix(m):
     return R
 
 
-def plot_losses(intermediate_losses, title, filename):
+def save_loss_plot(intermediate_losses, optimizer_name, distance_type, experience_index):
+    """Saves a plot of the loss over iterations for a given optimizer."""
+    # Create directory structure if it doesn't exist
+    directory = f"results/{optimizer_name}/{distance_type}/exp{experience_index}"
+    os.makedirs(directory, exist_ok=True)
+    
+    # Plot the losses and save the figure
     plt.figure()
-    plt.plot(intermediate_losses)
-    plt.title(title)
-    plt.xlabel('Iterations')
-    plt.ylabel('Loss')
-    plt.savefig(filename)
+    plt.plot(intermediate_losses, label=f"{optimizer_name} Loss")
+    plt.xlabel("Iterations")
+    plt.ylabel("Loss")
+    plt.title(f"Loss over iterations using {optimizer_name}")
+    plt.legend()
+    plt.savefig(f"{directory}/loss_plot.png")
     plt.close()
 
 def generate_elliptical_cloud(mean, cov, num_points):
@@ -315,8 +325,10 @@ def run_optimization(distance_type, experience_index, optimizer_name, A, B, quie
 
 def generate_energy_landscape(A, B, distance_type, rotation_vectors):
     """Generates the energy landscape data for the given point clouds and distance type."""
+    A_ = torch.tensor(A, dtype=torch.float32, device=device)
+    B_ = torch.tensor(B, dtype=torch.float32, device=device)
+    
     N = 150
-    # Assume rotation_vectors have been properly generated and passed here
     directions = rotation_vectors / np.linalg.norm(rotation_vectors, axis=1, keepdims=True)
     theta = np.linalg.norm(rotation_vectors, axis=1)
     
@@ -325,7 +337,7 @@ def generate_energy_landscape(A, B, distance_type, rotation_vectors):
     y = np.linspace(-np.pi, np.pi, N)
     z = np.linspace(-np.pi, np.pi, N)
     X, Y, Z = np.meshgrid(x, y, z)
-    mask = X**2 + Y**2 + Z**2 <= np.pi**2  # Mask the sphere
+    mask = X**2 + Y**2 + Z**2 <= np.pi**2  # Mask for spherical region
     
     img = np.zeros_like(X, dtype=float)  # Initialize array for loss values
     rot_vecs = directions * theta[:, None]  # Combine directions and angles
@@ -333,15 +345,26 @@ def generate_energy_landscape(A, B, distance_type, rotation_vectors):
     # Calculate costs for the sampled rotation vectors
     costs = []
     manifold = SpecialOrthogonalGroup(3, k=1)
-    for rot_vec in rot_vecs:
-        R = rotation_vector_to_rotation_matrix(rot_vec)
-        cost, _ = create_cost_and_derivates(manifold, A, B, distance_type, [], [], [])
-        costs.append(cost(R).item())  # Evaluate the cost function
     
-    # Interpolate the costs to the full grid using griddata
+    for rot_vec in rot_vecs:
+        R = torch.tensor(rotation_vector_to_rotation_matrix(rot_vec), dtype=torch.float32, device=device)
+        A_rotated = A_ @ R.T
+        if distance_type == "energy":
+            cost = geom_energy_distance(A_rotated, B_)
+        elif distance_type == "sinkhorn":
+            cost = geom_sinkhorn_distance(A_rotated, B_)
+        elif distance_type == "gaussian":
+            cost = geom_gaussian_distance(A_rotated, B_)
+        else:
+            raise ValueError(f"Unknown distance type: {distance_type}")
+        
+        costs.append(cost.item())  # Append CPU float for interpolation
+    
+    # Interpolate the costs to the full grid
     img = griddata(rot_vecs, np.array(costs), (X, Y, Z), method='linear')
-    img_sphere = np.where(mask, img, np.nan)  # Restrict to the sphere
-    return img_sphere
+    img_sphere = np.where(mask, img, np.nan)  # Restrict to the spherical region
+
+    return img_sphere  # Return as a NumPy array for PyVista
 
 
 def sample_directions(n_samples, random=False):
@@ -383,14 +406,15 @@ def sample_vectors(n_samples, random=False):
     return vectors
 
 
-def visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N):
+def visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N, save_path):
     grid = pv.ImageData(
         dimensions=img_sphere.shape,
         origin=(-np.pi, -np.pi, -np.pi),  # Center the origin at the middle of the sphere
         spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),
     )
     grid.point_data["img"] = img_sphere.flatten(order="F")
-    pl = pv.Plotter()
+    pl = pv.Plotter(off_screen=True)  # Use off_screen=True to allow screenshots without opening a window
+    
     vmax = np.nanmax(img_sphere)
     vmin = np.nanmin(img_sphere)
     contours = grid.contour(
@@ -440,7 +464,6 @@ def visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N):
         scalar_value = scalars[i]
         color = colormap((scalar_value - 1) / (num_rotations - 1))[:3]  # Get RGB values from colormap
         sphere = pv.Sphere(radius=0.1, center=point)
-        # Add the sphere with scalar value for correct coloring
         pl.add_mesh(sphere, color=color, opacity=1.0)
         
         if i < num_rotations - 1:
@@ -455,8 +478,11 @@ def visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N):
     pl.enable_ssao(radius=15, bias=0.5)
     pl.enable_anti_aliasing("ssaa")
     pl.camera.zoom(1.1)
-    pl.save_graphic("energy_landscape.svg")
-    pl.show()
+
+    # Save screenshot
+    pl.screenshot(save_path)  # This will work with off_screen=True
+    pl.show()  # Optional, only if you want to render onscreen if off_screen=False
+
 
 
 def get_atom_coordinates(pdb_file):
@@ -474,37 +500,53 @@ def get_atom_coordinates(pdb_file):
     return np.array(atoms)
 
 
-"""if __name__ == "__main__":
+if __name__ == "__main__":
     experience_index = 35
-    optimizer_name = "ConjugateGradient"
-    n_samples = 2000  # Adjust number of samples as needed
+    n_samples = 2000
     rotation_vectors = sample_vectors(n_samples, random=True)
     dim = 3
     mean_A = np.zeros(dim)
     cov_A = np.diag([1.0, 1.0, 1.0])
     points_A = generate_elliptical_cloud(mean_A, cov_A, 50)
     points_A[:, 0] = points_A[:, 0] * 2
-    A = points_A.numpy()
-    B = A.copy()  # Ensure the optimum is centered
-    
-    manifold = SpecialOrthogonalGroup(dim, k=1)
-    X_initial = manifold.random_point()
-    print(f"Initial rotation matrix:\n{X_initial}")
-    
-    # Generate the energy landscape data
-    distance_type = "gaussian"
-    img_sphere = generate_energy_landscape(A, B, distance_type, rotation_vectors)
-    
-    # Run the optimization with X_initial as the initial point
-    X, intermediate_rotations, intermediate_rotation_vectors, intermediate_losses = run_optimization(
-        distance_type, experience_index, optimizer_name, A, B, quiet=False, initial_point=X_initial
-    )
-    print(intermediate_rotation_vectors)
-    
-    # Visualize the energy landscape with arrows
-    visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N=150)"""
 
-if __name__ == "__main__":
+    #A = points_A.numpy()
+    pdb_file = "./MDSPACE_tuto-Data/AK.pdb" 
+    atoms = get_atom_coordinates(pdb_file)
+    A = torch.tensor(atoms, dtype=torch.float32, device=device)
+    B = A.clone()
+
+    manifold = SpecialOrthogonalGroup(dim, k=1)
+    X_initial = torch.tensor(manifold.random_point(), dtype=torch.float32, device=device)
+    print(f"Initial rotation matrix:\n{X_initial.cpu()}")
+
+    distance_type = "gaussian"
+    img_sphere = generate_energy_landscape(A.cpu().numpy(), B.cpu().numpy(), distance_type, rotation_vectors)
+
+    # Define the optimizers to use in the experiment
+    optimizers = ["ConjugateGradient", "SteepestDescent", "TrustRegions"]
+
+    # Run the optimization for each optimizer and save loss plots and snapshots
+    for optimizer_name in optimizers:
+        X, intermediate_rotations, intermediate_rotation_vectors, intermediate_losses = run_optimization(
+            distance_type, experience_index, optimizer_name, A.cpu().numpy(), B.cpu().numpy(), quiet=False, initial_point=X_initial.cpu().numpy()
+        )
+        print(f"{optimizer_name} finished with final rotation:\n{X}")
+
+        # Directory for saving results of this optimizer
+        directory = f"results/{optimizer_name}/{distance_type}/exp{experience_index}"
+        os.makedirs(directory, exist_ok=True)
+        
+        # Save the loss plot for the current optimizer
+        save_loss_plot(intermediate_losses, optimizer_name, distance_type, experience_index)
+
+        # Path to save the snapshot of the energy landscape
+        snapshot_path = f"{directory}/energy_landscape.png"
+        visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N=150, save_path=snapshot_path)
+
+
+
+"""if __name__ == "__main__":
     experience_index = 36
     optimizers = ["ConjugateGradient", "TrustRegions", "SteepestDescent"]  # Add more optimizers if needed
     distance_types = ["energy", "gaussian", "sinkhorn"]
@@ -519,11 +561,11 @@ if __name__ == "__main__":
     point_cloud = atoms
     A = point_cloud
 
-    """mean_A = np.zeros(dim)
+    "mean_A = np.zeros(dim)
     cov_A = np.diag([1.0, 1.0, 1.0])
     points_A = generate_elliptical_cloud(mean_A, cov_A, 50)
     points_A[:, 0] = points_A[:, 0] * 2
-    A = points_A.numpy()"""
+    A = points_A.numpy()"
     B = A.copy()  # Ensure the optimum is centered
 
     manifold = SpecialOrthogonalGroup(dim, k=1)
@@ -578,5 +620,4 @@ if __name__ == "__main__":
                 # Visualize and save the energy landscape with arrows
                 visualize_energy_landscape_v2(img_sphere, intermediate_rotation_vectors, N=150)
                 svg_filename = f'{directory}{distance_type}_{optimizer_name}_epsilon_{epsilon}_landscape.svg'
-                plt.savefig(svg_filename)
-
+                plt.savefig(svg_filename)"""
