@@ -10,7 +10,7 @@ import nibabel as nib
 import matplotlib.cm as cm
 import Bio.PDB
 
-from scipy.interpolate import griddata
+from scipy.interpolate import griddata, RBFInterpolator
 from mpl_toolkits.mplot3d import Axes3D
 from geomloss import SamplesLoss
 from pymanopt.manifolds import SpecialOrthogonalGroup
@@ -335,7 +335,10 @@ def generate_energy_landscape(A, B, distance_type, rotation_vectors):
         costs.append(cost.item())  # Append CPU float for interpolation
     
     # Interpolate the costs to the full grid
-    img = griddata(rot_vecs, np.array(costs), (X, Y, Z), method='linear')
+    #img = griddata(rot_vecs, np.array(costs), (X, Y, Z), method='linear')
+    XYZ = np.stack((X, Y, Z), axis=-1).reshape(-1, 3)
+    img = RBFInterpolator(rot_vecs, np.array(costs), kernel="linear")(XYZ)
+    img = img.reshape(N, N, N)
     img_sphere = np.where(mask, img, np.nan)  # Restrict to the spherical region
 
     return img_sphere  # Return as a NumPy array for PyVista
@@ -831,8 +834,8 @@ def create_energy_landscape_video(img_sphere, intermediate_rotation_vectors, N, 
 
 if __name__ == "__main__":
     # Set experiment parameters
-    experience_index = 40  # Update as needed
-    distance_type = "gaussian"  # Options: 'energy', 'sinkhorn', 'gaussian'
+    experience_index = 44  # Update as needed
+    distance_type = "sinkhorn"  # Options: 'energy', 'sinkhorn', 'gaussian'
     epsilon = 0.1  # Epsilon value for Sinkhorn or Gaussian distances
     optimizer_names = ["ConjugateGradient"]
 
