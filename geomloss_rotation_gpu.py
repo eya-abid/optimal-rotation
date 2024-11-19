@@ -10,8 +10,9 @@ import matplotlib.cm as cm
 import Bio.PDB
 import cv2  # Added for video creation
 import numpy as np
+from scipy.stats import rv_continuous
 
-from scipy.interpolate import griddata, RBFInterpolator
+from scipy.interpolate import griddata, RBFInterpolator, interp1d
 from mpl_toolkits.mplot3d import Axes3D
 from geomloss import SamplesLoss
 from pymanopt.manifolds import SpecialOrthogonalGroup
@@ -71,23 +72,23 @@ def rotation_matrix_to_rotation_vector(R_tensor):
     rotation_vector = theta * a
     return rotation_vector
 
-def rotation_vector_to_rotation_matrix(m_tensor):
-    """
-    Converts a rotation vector to a rotation matrix.
-    :param m_tensor: 3D rotation vector (torch.Tensor on GPU)
-    :return: 3x3 rotation matrix (torch.Tensor on GPU)
-    """
-    theta = torch.norm(m_tensor)
-    if theta.item() != 0:
-        a = m_tensor / theta
-    else:
-        a = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=torch.float64)
-
-    a_hat = torch.tensor([[0, -a[2], a[1]],
-                          [a[2], 0, -a[0]],
-                          [-a[1], a[0], 0]], device=device, dtype=torch.float64)
-
-    R = torch.eye(3, device=device, dtype=torch.float64) + torch.sin(theta) * a_hat + (1 - torch.cos(theta)) * torch.matmul(a_hat, a_hat)
+def rotation_vector_to_rotation_matrix(rot_vec):
+    # Convertir rot_vec en torch.Tensor si nécessaire
+    if not isinstance(rot_vec, torch.Tensor):
+        rot_vec = torch.tensor(rot_vec, dtype=torch.float32)
+    
+    theta = torch.norm(rot_vec)
+    if theta.item() == 0:
+        return torch.eye(3, dtype=torch.float32)
+    
+    k = rot_vec / theta
+    K = torch.tensor([
+        [0, -k[2], k[1]],
+        [k[2], 0, -k[0]],
+        [-k[1], k[0], 0]
+    ], dtype=torch.float32)
+    
+    R = torch.eye(3, dtype=torch.float32) + torch.sin(theta) * K + (1 - torch.cos(theta)) * torch.matmul(K, K)
     return R
 
 # ===========================
@@ -344,16 +345,68 @@ def run_optimization_with_profiling(
 # Sampling Functions
 # ===========================
 
-def sample_angles(n_samples):
-    """Samples angles uniformly for rotation vectors."""
+class UniformAngle(rv_continuous):
+    """Cette distribution d'angles correspond à la distribution de Haar sur SO(3)."""
+    def _pdf(self, x):
+        return (1 - np.cos(x)) / np.pi
+
+# Instancier la distribution et l'interpolateur
+angle_distribution = UniformAngle(a=0, b=np.pi, name='UniformAngle')
+
+def sample_angles(n_samples, random=False):
+    if random:
+        u = np.random.rand(n_samples)
+        return angle_distribution.ppf(u)
+    else:
+        t = np.linspace(0, 1, n_samples)
+        return angle_distribution.ppf(t)
+
+def sample_directions(n_samples, random=False):
+    if random:
+        points = np.random.randn(n_samples, 3)
+        points /= np.linalg.norm(points, axis=1)[:, None]
+        return points
+    else:
+        # Fibonacci sphere
+        phi = np.pi * (np.sqrt(5.) - 1.)
+        i = np.arange(n_samples)
+        y = 1 - (i / float(n_samples - 1)) * 2
+        radius = np.sqrt(1 - y * y)
+        theta = phi * i
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+        points = np.stack((x, y, z), axis=1)
+        return points
+
+def sample_vectors(n_samples, random=False):
+    if random:
+        angles = sample_angles(n_samples, random=random)
+        directions = sample_directions(n_samples, random=random)
+        vectors = (angles[:, None] * directions).reshape(-1, 3)
+    else:
+        n_angles = int(0.5 * (n_samples ** (1/3)))
+        n_directions = n_samples // n_angles
+        angles = sample_angles(n_angles, random=random)
+        directions = sample_directions(n_directions, random=random)
+        angles = angles[:, None, None]
+        directions = directions[None, :, :]
+        vectors = (angles * directions).reshape(-1, 3)
+    
+    # Calculer les normes des vecteurs
+    norms = np.linalg.norm(vectors, axis=1)
+    
+    # Filtrer les vecteurs avec une norme supérieure au seuil
+    non_zero = norms > 1e-6
+    vectors = vectors[non_zero]
+    print(f"Sampled vectors shape (non-zero): {vectors.shape}")
+    
+    return vectors
+
+"""def sample_angles(n_samples):
     theta = torch.acos(1 - 2 * torch.rand(n_samples, device=device, dtype=torch.float64))
     return theta
 
 def sample_directions(n_samples, random=False):
-    """
-    Samples directions uniformly on the unit sphere.
-    If random=False, uses Fibonacci sphere for uniform sampling.
-    """
     if random:
         points = torch.randn(n_samples, 3, device=device)
         points = points / points.norm(dim=1, keepdim=True)
@@ -371,9 +424,6 @@ def sample_directions(n_samples, random=False):
         return points
 
 def sample_vectors(n_samples, random=False):
-    """
-    Samples rotation vectors either randomly or using a grid.
-    """
     if random:
         angles = sample_angles(n_samples)  # Already on the GPU
         directions = sample_directions(n_samples, random=random)  # Already on the GPU
@@ -387,165 +437,94 @@ def sample_vectors(n_samples, random=False):
         directions = directions.view(1, -1, 3)
         vectors = (angles * directions).reshape(-1, 3)
     print(vectors.shape)
-    return vectors
+    return vectors"""
 
 # ===========================
 # Energy Landscape Generation
 # ===========================
 
-def generate_energy_landscape(A, B, distance_type, rotation_vectors):
-    """
-    Generates the energy landscape data for the given point clouds and distance type.
-    """
-    A_ = A.to(device)
-    B_ = B.to(device)
+def generate_energy_landscape(A, B, distance_type, rotation_vectors, device='cpu'):
+    """Génère les données du paysage énergétique pour les nuages de points donnés et le type de distance."""
+    A_ = torch.tensor(A, dtype=torch.float32, device=device)
+    B_ = torch.tensor(B, dtype=torch.float32, device=device)
     
     N = 150
-    directions = rotation_vectors / rotation_vectors.norm(dim=1, keepdim=True)
-    theta = rotation_vectors.norm(dim=1)
+    norms = np.linalg.norm(rotation_vectors, axis=1)
+    non_zero = norms > 1e-6
+    rotation_vectors = rotation_vectors[non_zero]
+    norms_non_zero = norms[non_zero]
     
-    # Create a 3D meshgrid of points in the cube [-pi, pi] x [-pi, pi] x [-pi, pi]
-    x = torch.linspace(-torch.pi, torch.pi, N, device=device)
-    y = torch.linspace(-torch.pi, torch.pi, N, device=device)
-    z = torch.linspace(-torch.pi, torch.pi, N, device=device)
-    X, Y, Z = torch.meshgrid(x, y, z, indexing='ij')
-    mask = X**2 + Y**2 + Z**2 <= torch.pi**2  # Mask for spherical region
+    if rotation_vectors.size == 0:
+        raise ValueError("No valid rotation vectors available after filtering zero vectors.")
     
-    img = torch.zeros_like(X, dtype=torch.float32, device=device)
-    rot_vecs = directions * theta.unsqueeze(1)  # Combine directions and angles
+    # Normaliser les vecteurs de rotation
+    directions = rotation_vectors / norms_non_zero[:, np.newaxis]
+    theta = norms_non_zero
     
-    # Calculate costs for the sampled rotation vectors
+    # Créer une grille 3D
+    x = np.linspace(-np.pi, np.pi, N)
+    y = np.linspace(-np.pi, np.pi, N)
+    z = np.linspace(-np.pi, np.pi, N)
+    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+    mask = X**2 + Y**2 + Z**2 <= np.pi**2
+    
+    img = np.zeros_like(X, dtype=float)
+    
+    # Calculer les coûts
     costs = []
-    
-    for rot_vec in rot_vecs:
-        R = rotation_vector_to_rotation_matrix(rot_vec)
-        A_rotated = torch.matmul(A_, R.T)
+    for rot_vec in rotation_vectors:
+        R = rotation_vector_to_rotation_matrix(rot_vec).to(device)
+        A_rotated = A_ @ R.T
         if distance_type == "energy":
-            loss = geom_energy_distance(A_rotated, B_)
+            cost = geom_energy_distance(A_rotated, B_)
         elif distance_type == "sinkhorn":
-            loss = geom_sinkhorn_distance(A_rotated, B_)
+            cost = geom_sinkhorn_distance(A_rotated, B_)
         elif distance_type == "gaussian":
-            loss = geom_gaussian_distance(A_rotated, B_)
+            cost = geom_gaussian_distance(A_rotated, B_)
         else:
             raise ValueError(f"Unknown distance type: {distance_type}")
         
-        costs.append(loss.item())  # Append CPU float for interpolation
+        costs.append(cost.item())
     
-    # Interpolate the costs to the full grid
-    rot_vecs_cpu = rot_vecs.cpu().numpy()
-    costs_cpu = np.array(costs)
+    costs = np.array(costs)
     
-    # Interpolation using RBFInterpolator (can also use griddata if preferred)
-    XYZ = np.stack((X.flatten().cpu().numpy(), Y.flatten().cpu().numpy(), Z.flatten().cpu().numpy()), axis=-1)
-    rbf = RBFInterpolator(rot_vecs_cpu, costs_cpu, kernel='linear')
-    img_cpu = rbf(XYZ)
-    img = torch.from_numpy(img_cpu).to(device).view(N, N, N)
-    img_sphere = torch.where(mask, img, torch.tensor(np.nan, device=device))
+    # Vérifier le nombre de points pour l'interpolation
+    if rotation_vectors.shape[0] < 10:
+        print("Warning: Peu de points pour l'interpolation. L'interpolation peut être inadéquate.")
     
-    return img_sphere.cpu().numpy()  # Return as a NumPy array for visualization
+    # Interpolation
+    XYZ = np.stack((X, Y, Z), axis=-1).reshape(-1, 3)
+    try:
+        rbf = RBFInterpolator(rotation_vectors, costs, kernel="linear")
+        img_flat = rbf(XYZ)
+        img = img_flat.reshape(N, N, N)
+    except Exception as e:
+        print(f"Interpolation error: {e}")
+        img = np.full((N, N, N), np.nan)
+    
+    img_sphere = np.where(mask, img, np.nan)
+    
+    if np.all(np.isnan(img_sphere)):
+        print("Erreur: img_sphere contient uniquement des NaN après interpolation.")
+    else:
+        print("Interpolation réussie avec des valeurs valides dans img_sphere.")
+    
+    return img_sphere
 
 # ===========================
-# Visualization Functions
+# Correction pour visualize_energy_landscape
 # ===========================
 
 def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N, save_path):
     """
-    Visualizes the energy landscape with optimization steps.
+    Visualise le paysage énergétique avec les étapes d'optimisation.
     """
-    grid = pv.ImageData(
-        dimensions=img_sphere.shape,
-        origin=(-np.pi, -np.pi, -np.pi),  # Center the origin at the middle of the sphere
-        spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),
-    )
-    grid.point_data["img"] = img_sphere.flatten(order="F")
-    pl = pv.Plotter(off_screen=True)  # Use off_screen=True to allow screenshots without opening a window
+    # Vérifier si img_sphere contient des valeurs valides
+    if np.all(np.isnan(img_sphere)):
+        print("Erreur: img_sphere contient uniquement des NaN. Vérifiez l'interpolation.")
+        return
     
-    vmax = np.nanmax(img_sphere)
-    vmin = np.nanmin(img_sphere)
-    contours = grid.contour(
-        isosurfaces=np.linspace(vmin, vmax, 11), scalars="img", method="flying_edges"
-    )
-    contours.compute_normals(inplace=True)
-    sphere_surface = pv.Sphere(
-        center=(0, 0, 0), radius=np.pi, theta_resolution=100, phi_resolution=100
-    )
-    pl.add_mesh(
-        contours,
-        opacity=0.1,  # Adjusted opacity for better contrast
-        cmap="RdBu",
-        ambient=0.2,
-        diffuse=1,
-        interpolation="gouraud",
-        show_scalar_bar=True,
-        scalar_bar_args=dict(vertical=True),
-    )
-    pl.add_mesh(
-        sphere_surface,
-        color="black",
-        opacity=0.1,  # Adjusted opacity for better contrast
-        culling="front",
-        interpolation="pbr",
-        roughness=1,
-    )
-    num_rotations = len(intermediate_rotation_vectors)
-    colormap = plt.get_cmap("viridis")  # Use a high-contrast colormap
-
-    # Create a VTK lookup table from the colormap
-    lookup_table = vtk.vtkLookupTable()
-    lookup_table.SetNumberOfTableValues(num_rotations)
-    lookup_table.SetRange(1, num_rotations)  # Set the correct range from 1 to num_rotations
-    lookup_table.Build()
-
-    # Add optimization steps as spheres and lines
-    points = np.array(intermediate_rotation_vectors)
-    scalars = np.arange(1, num_rotations + 1)  # Starting from 1
-
-    for i, point in enumerate(points):
-        scalar_value = scalars[i]
-        color = colormap((scalar_value - 1) / (num_rotations - 1))[:3]  # Get RGB values from colormap
-        sphere = pv.Sphere(radius=0.1, center=point)
-        pl.add_mesh(sphere, color=color, opacity=1.0)
-        
-        if i < num_rotations - 1:
-            next_point = points[i + 1]
-            line = pv.Line(point, next_point)
-            pl.add_mesh(line, color="black")
-
-    # Add scalar bar
-    scalar_bar = pl.add_scalar_bar(title="Optimization Step", vertical=True, n_labels=5)
-    scalar_bar.SetLookupTable(lookup_table)
-
-    pl.enable_ssao(radius=15, bias=0.5)
-    pl.enable_anti_aliasing("ssaa")
-    pl.camera.zoom(1.1)
-
-    # Save screenshot
-    pl.screenshot(save_path)  # This will work with off_screen=True
-    pl.show()  # Optional, only if you want to render onscreen if off_screen=False
-
-def visualize_energy_landscape2(
-    img_sphere, 
-    intermediate_rotation_vectors, 
-    N, 
-    save_path, 
-    video_filename=None, 
-    num_frames=180
-):
-    """
-    Visualizes the energy landscape with optimization steps and creates a rotating video.
-
-    Parameters:
-    - img_sphere: numpy.ndarray, shape (N, N, N), the energy landscape data.
-    - intermediate_rotation_vectors: list or numpy.ndarray, rotation vectors from the optimization process.
-    - N: int, resolution of the energy landscape grid.
-    - save_path: str, path to save the snapshot image.
-    - video_filename: str, path to save the video file (optional).
-    - num_frames: int, number of frames in the video (default: 180).
-    """
-    # Initialize Plotter with off_screen rendering
-    pl = pv.Plotter(off_screen=True)
-    
-    # Create grid for the energy landscape
+    # Créer une grille PyVista
     grid = pv.ImageData(
         dimensions=img_sphere.shape,
         origin=(-np.pi, -np.pi, -np.pi),
@@ -553,33 +532,42 @@ def visualize_energy_landscape2(
     )
     grid.point_data["img"] = img_sphere.flatten(order="F")
     
-    # Compute contours
+    pl = pv.Plotter(off_screen=True)  # Utiliser off_screen=True pour les environnements sans affichage
+    
     vmax = np.nanmax(img_sphere)
     vmin = np.nanmin(img_sphere)
-    contours = grid.contour(
-        isosurfaces=np.linspace(vmin, vmax, 11),
-        scalars="img",
-        method="flying_edges"
-    )
-    contours.compute_normals(inplace=True)
     
-    # Create sphere surface
+    try:
+        contours = grid.contour(
+            isosurfaces=np.linspace(vmin, vmax, 11),
+            scalars="img",
+            method="flying_edges"
+        )
+        contours.compute_normals(inplace=True)
+    except Exception as e:
+        print(f"Erreur lors de la création des contours: {e}")
+        contours = None
+    
+    if contours is not None and contours.n_points > 0:
+        pl.add_mesh(
+            contours,
+            opacity=0.1,
+            cmap="RdBu",
+            ambient=0.2,
+            diffuse=1,
+            interpolation="gouraud",
+            show_scalar_bar=True,
+            scalar_bar_args=dict(vertical=True),
+        )
+    else:
+        print("Aucun contour valide créé. Skipping contour plotting.")
+    
+    # Ajouter une surface sphérique
     sphere_surface = pv.Sphere(
         center=(0, 0, 0),
         radius=np.pi,
         theta_resolution=100,
         phi_resolution=100
-    )
-    
-    # Add meshes to the plotter
-    pl.add_mesh(
-        contours,
-        opacity=0.1,
-        cmap="RdBu",
-        ambient=0.2,
-        diffuse=1,
-        interpolation="gouraud",
-        show_scalar_bar=False,
     )
     pl.add_mesh(
         sphere_surface,
@@ -590,23 +578,121 @@ def visualize_energy_landscape2(
         roughness=1,
     )
     
-    # Plot optimization steps
+    # Ajouter les étapes d'optimisation
     num_rotations = len(intermediate_rotation_vectors)
-    colormap = plt.get_cmap("viridis")
-    points = np.array(intermediate_rotation_vectors)
-    scalars = np.arange(1, num_rotations + 1)
-    
-    for i, point in enumerate(points):
-        color = colormap((i) / (num_rotations - 1))[:3]
-        sphere = pv.Sphere(radius=0.1, center=point)
-        pl.add_mesh(sphere, color=color, opacity=1.0)
+    if num_rotations > 0:
+        points = np.array(intermediate_rotation_vectors)
+        colormap = plt.get_cmap("viridis")
         
-        if i < num_rotations - 1:
-            next_point = points[i + 1]
-            line = pv.Line(point, next_point)
-            pl.add_mesh(line, color="black")
+        for i, point in enumerate(points):
+            color = colormap(i / max(num_rotations - 1, 1))[:3]  # Sécurité pour éviter division par zéro
+            sphere = pv.Sphere(radius=0.1, center=point)
+            pl.add_mesh(sphere, color=color, opacity=1.0)
+            
+            if i < num_rotations - 1:
+                next_point = points[i + 1]
+                line = pv.Line(point, next_point)
+                pl.add_mesh(line, color="black")
+    else:
+        print("Aucune étape d'optimisation à visualiser.")
     
-    # Add scalar bar
+    # Configurer l'affichage
+    pl.enable_ssao(radius=15, bias=0.5)
+    pl.enable_anti_aliasing("ssaa")
+    pl.camera.zoom(1.1)
+    pl.hide_axes()
+    
+    # Sauvegarder la capture d'écran
+    try:
+        pl.screenshot(save_path)
+        print(f"Snapshot sauvegardé en tant que {save_path}")
+    except Exception as e:
+        print(f"Erreur lors de la sauvegarde du snapshot: {e}")
+    
+    pl.close()
+
+
+# ===========================
+def visualize_energy_landscape2(img_sphere, intermediate_rotation_vectors, N, save_path):
+    grid = pv.ImageData(
+        dimensions=img_sphere.shape,
+        origin=(-np.pi, -np.pi, -np.pi),
+        spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),
+    )
+    grid.point_data["img"] = img_sphere.flatten(order="F")
+    pl = pv.Plotter(off_screen=True)
+    
+    if np.all(np.isnan(img_sphere)):
+        print("Erreur: img_sphere contient uniquement des NaN. Skipping visualization.")
+        pl.close()
+        return
+    
+    try:
+        vmax = np.nanmax(img_sphere)
+        vmin = np.nanmin(img_sphere)
+        
+        contours = grid.contour(
+            isosurfaces=np.linspace(vmin, vmax, 11),
+            scalars="img",
+            method="flying_edges"
+        )
+        
+        if contours.n_cells == 0:
+            raise ValueError("Aucun contour valide trouvé.")
+        
+        try:
+            contours.compute_normals(inplace=True)
+        except TypeError as te:
+            print(f"Erreur lors de la computation des normales: {te}")
+            contours = None
+        
+        if contours is not None:
+            pl.add_mesh(
+                contours,
+                opacity=0.1,
+                cmap="RdBu",
+                ambient=0.2,
+                diffuse=1,
+                interpolation="gouraud",
+                show_scalar_bar=False,
+            )
+        
+    except Exception as e:
+        print(f"Erreur lors de la création des contours: {e}")
+        contours = None
+    
+    sphere_surface = pv.Sphere(
+        center=(0, 0, 0),
+        radius=np.pi,
+        theta_resolution=100,
+        phi_resolution=100
+    )
+    pl.add_mesh(
+        sphere_surface,
+        color="black",
+        opacity=0.1,
+        culling="front",
+        interpolation="pbr",
+        roughness=1,
+    )
+    
+    num_rotations = len(intermediate_rotation_vectors)
+    if num_rotations > 0:
+        colormap = plt.get_cmap("viridis")
+        points = np.array(intermediate_rotation_vectors)
+        
+        for i, point in enumerate(points):
+            color = colormap(i / max(num_rotations - 1, 1))[:3]
+            sphere = pv.Sphere(radius=0.1, center=point)
+            pl.add_mesh(sphere, color=color, opacity=1.0)
+            
+            if i < num_rotations - 1:
+                next_point = points[i + 1]
+                line = pv.Line(point, next_point)
+                pl.add_mesh(line, color="black")
+    else:
+        print("Aucune étape d'optimisation à visualiser.")
+    
     scalar_bar_args = {
         "title": "Optimization Step",
         "vertical": True,
@@ -618,34 +704,18 @@ def visualize_energy_landscape2(
     }
     pl.add_scalar_bar(**scalar_bar_args)
     
-    # Enhance visualization
     pl.enable_ssao(radius=15, bias=0.5)
     pl.enable_anti_aliasing("ssaa")
     pl.camera.zoom(1.1)
     pl.hide_axes()
     
-    if video_filename:
-        # Open the movie file
-        pl.open_movie(video_filename, framerate=30)
-    
-    # Render the scene
-    pl.render()
-    
-    if video_filename:
-        # Rotate the camera and write frames
-        for frame in range(num_frames):
-            pl.camera.Azimuth(360.0 / num_frames)  # Rotate camera
-            pl.render()
-            pl.write_frame()
-    
-        # Close the movie
-        pl.close()
-        print(f"Video saved as {video_filename}")
-    else:
-        # Save the snapshot image
+    try:
         pl.screenshot(save_path)
-        pl.close()
         print(f"Snapshot saved as {save_path}")
+    except Exception as e:
+        print(f"Erreur lors de la sauvegarde du snapshot: {e}")
+    pl.close()
+
 
 # ===========================
 # Atom Coordinates Extraction
@@ -671,149 +741,6 @@ def get_atom_coordinates(pdb_file):
     return np.array(atoms)
 
 # ===========================
-# Rotating Video Creation
-# ===========================
-
-def create_energy_landscape_video(img_sphere, intermediate_rotation_vectors, N, video_filename, num_frames=180):
-    """
-    Creates a rotating video of the energy landscape with optimization steps.
-    """
-    # Create a temporary directory to store frames
-    temp_dir = "temp_frames"
-    os.makedirs(temp_dir, exist_ok=True)
-
-    # Initialize Plotter
-    pl = pv.Plotter(off_screen=True)
-    
-    # Create the grid for the energy landscape
-    grid = pv.ImageData(
-        dimensions=img_sphere.shape,
-        origin=(-np.pi, -np.pi, -np.pi),  # Center the origin at the middle of the sphere
-        spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),
-    )
-    grid.point_data["img"] = img_sphere.flatten(order="F")
-    
-    vmax = np.nanmax(img_sphere)
-    vmin = np.nanmin(img_sphere)
-    contours = grid.contour(
-        isosurfaces=np.linspace(vmin, vmax, 11), 
-        scalars="img", 
-        method="flying_edges"
-    )
-    contours.compute_normals(inplace=True)
-    
-    # Create sphere surface
-    sphere_surface = pv.Sphere(
-        center=(0, 0, 0), 
-        radius=np.pi, 
-        theta_resolution=100, 
-        phi_resolution=100
-    )
-    
-    # Add contour mesh
-    pl.add_mesh(
-        contours,
-        opacity=0.1,  # Adjusted opacity for better contrast
-        cmap="RdBu",
-        ambient=0.2,
-        diffuse=1,
-        interpolation="gouraud",
-        show_scalar_bar=False,  # We'll add a scalar bar at the end
-    )
-    
-    # Add sphere surface mesh
-    pl.add_mesh(
-        sphere_surface,
-        color="black",
-        opacity=0.1,  # Adjusted opacity for better contrast
-        culling="front",
-        interpolation="pbr",
-        roughness=1,
-    )
-    
-    num_rotations = len(intermediate_rotation_vectors)
-    colormap = plt.get_cmap("viridis")  # Use a high-contrast colormap
-
-    # Create a VTK lookup table from the colormap
-    lookup_table = vtk.vtkLookupTable()
-    lookup_table.SetNumberOfTableValues(num_rotations)
-    lookup_table.SetRange(1, num_rotations)  # Set the correct range from 1 to num_rotations
-    lookup_table.Build()
-
-    # Add optimization steps as spheres and lines
-    points = np.array(intermediate_rotation_vectors)
-    scalars = np.arange(1, num_rotations + 1)  # Starting from 1
-
-    for i in range(num_rotations):
-        color = colormap(i / (num_rotations - 1))[:3]
-        lookup_table.SetTableValue(i, *color, 1.0)  # Add color to the lookup table
-
-    for i, point in enumerate(points):
-        scalar_value = scalars[i]
-        color = colormap((scalar_value - 1) / (num_rotations - 1))[:3]  # Get RGB values from colormap
-        sphere = pv.Sphere(radius=0.1, center=point)
-        pl.add_mesh(sphere, color=color, opacity=1.0)
-        
-        if i < num_rotations - 1:
-            next_point = points[i + 1]
-            line = pv.Line(point, next_point)
-            pl.add_mesh(line, color="black")
-
-    # Add scalar bar
-    scalar_bar = pl.add_scalar_bar(title="Optimization Step", vertical=True, n_labels=5)
-    scalar_bar.SetLookupTable(lookup_table)
-
-    pl.enable_ssao(radius=15, bias=0.5)
-    pl.enable_anti_aliasing("ssaa")
-    pl.camera.zoom(1.1)
-    pl.hide_axes()
-
-    # Capture frames with rotating camera
-    for frame in range(num_frames):
-        # Rotate camera by a fixed angle
-        pl.camera.Azimuth(360.0 / num_frames)
-        
-        # Render and capture frame
-        frame_filename = os.path.join(temp_dir, f"frame_{frame:04d}.png")
-        pl.screenshot(frame_filename)
-        
-    # Close the Plotter
-    pl.close()
-
-    # Compile frames into a video using OpenCV
-    frame_files = [os.path.join(temp_dir, f) for f in sorted(os.listdir(temp_dir)) if f.endswith(".png")]
-
-    if not frame_files:
-        print("No frames captured. Video not created.")
-        return
-
-    # Read the first frame to get the frame dimensions
-    frame = cv2.imread(frame_files[0])
-    if frame is None:
-        print(f"Error reading frame {frame_files[0]}. Video not created.")
-        return
-    height, width, layers = frame.shape
-
-    # Define the codec and create VideoWriter object
-    video = cv2.VideoWriter(video_filename, cv2.VideoWriter_fourcc(*'mp4v'), 30, (width, height))
-
-    for frame_file in frame_files:
-        frame = cv2.imread(frame_file)
-        if frame is not None:
-            video.write(frame)
-        else:
-            print(f"Warning: Unable to read frame {frame_file}. Skipping.")
-
-    video.release()
-
-    # Clean up temporary frames
-    for frame_file in frame_files:
-        os.remove(frame_file)
-    os.rmdir(temp_dir)
-
-    print(f"Video saved as {video_filename}")
-
-# ===========================
 # Mapping Rotation Vector to Point
 # ===========================
 
@@ -836,8 +763,8 @@ def rotation_vector_to_point(rot_vec):
 
 if __name__ == "__main__":
     # Set experiment parameters
-    experience_index = 42  # Update as needed
-    distance_type = "energy"  # Options: 'energy', 'sinkhorn', 'gaussian'
+    experience_index = 43  # Update as needed
+    distance_type = "sinkhorn"  # Options: 'energy', 'sinkhorn', 'gaussian'
     epsilon = 0.1  # Epsilon value for Sinkhorn or Gaussian distances
     optimizer_names = ["ConjugateGradient"]
 
@@ -850,11 +777,29 @@ if __name__ == "__main__":
     # Generate rotation vectors for the energy landscape
     n_samples = 2000
     rotation_vectors = sample_vectors(n_samples, random=True)  # rotation_vectors are now tensors on GPU
+    print(f"Sampled vectors shape (non-zero): {rotation_vectors.shape}")
 
-    # Generate energy landscape
-    img_sphere = generate_energy_landscape(
-        A, B, distance_type, rotation_vectors
-    )
+     # Vérifier et exclure les vecteurs avec une norme nulle
+    zero_norms = np.linalg.norm(rotation_vectors, axis=1) == 0
+    if np.any(zero_norms):
+        print("Warning: Some rotation vectors have zero magnitude and will be excluded.")
+        rotation_vectors = rotation_vectors[~zero_norms]
+        print(f"After exclusion, vectors shape: {rotation_vectors.shape}")
+
+    try:
+        img_sphere = generate_energy_landscape(
+            A.cpu().numpy(),
+            B.cpu().numpy(),
+            distance_type,
+            rotation_vectors,
+            device='cpu'  # Changez à 'cuda' si CUDA est disponible
+        )
+    except ValueError as ve:
+        print(f"Erreur lors de la génération du paysage énergétique: {ve}")
+        img_sphere = np.full((150, 150, 150), np.nan)
+
+     # Assurez-vous que rotation_vecs est défini correctement
+    rotation_vecs = rotation_vectors.tolist()  # Convertir en liste si nécessaire
 
     # Directory for saving results
     results_dir = f"results/exp{experience_index}"
@@ -878,15 +823,16 @@ if __name__ == "__main__":
         save_loss_plot(losses, filename=loss_plot_filename)
 
         snapshot_filename = f"{results_dir}/snapshot_{optimizer_name}_{distance_type}_epsilon{epsilon}.png"
-        visualize_energy_landscape(img_sphere, rotation_vecs, N=150, save_path=snapshot_filename)
+        #visualize_energy_landscape(img_sphere, rotation_vecs, N=150, save_path=snapshot_filename)
 
-        # Create rotating video
-        visualize_energy_landscape2(
-            img_sphere=img_sphere,
-            intermediate_rotation_vectors=rotation_vecs,
-            N=150,
-            save_path=snapshot_filename,  # Image snapshot
-            video_filename=video_filename,
-            num_frames=180  # Adjust the number of frames as needed
+        if not np.all(np.isnan(img_sphere)):
+            visualize_energy_landscape2(
+                img_sphere,
+                rotation_vecs,
+                N=150,
+                save_path=snapshot_filename
         )
+        else:
+            print("Skipping visualization due to invalid img_sphere data.")
+
     print("Optimization complete.")

@@ -9,8 +9,8 @@ import imageio
 import nibabel as nib
 import matplotlib.cm as cm
 import Bio.PDB
-
-from scipy.interpolate import griddata, RBFInterpolator
+from scipy.stats import rv_continuous
+from scipy.interpolate import griddata, RBFInterpolator, interp1d
 from mpl_toolkits.mplot3d import Axes3D
 from geomloss import SamplesLoss
 from pymanopt.manifolds import SpecialOrthogonalGroup
@@ -303,24 +303,28 @@ def generate_energy_landscape(A, B, distance_type, rotation_vectors):
     B_ = torch.tensor(B, dtype=torch.float32, device=device)
     
     N = 150
-    directions = rotation_vectors / np.linalg.norm(rotation_vectors, axis=1, keepdims=True)
-    theta = np.linalg.norm(rotation_vectors, axis=1)
+    # Supprimer keepdims=True pour obtenir un tableau 1D
+    norms = np.linalg.norm(rotation_vectors, axis=1)
+    non_zero = norms > 1e-6
+    rotation_vectors = rotation_vectors[non_zero]
+    directions = rotation_vectors / norms[non_zero, np.newaxis]
+    theta = norms[non_zero]
     
-    # Create a 3D meshgrid of points in the cube [-pi, pi] x [-pi, pi] x [-pi, pi]
+    if rotation_vectors.size == 0:
+        raise ValueError("No valid rotation vectors available after filtering zero vectors.")
+    
+    # Créer une grille 3D de points dans le cube [-pi, pi] x [-pi, pi] x [-pi, pi]
     x = np.linspace(-np.pi, np.pi, N)
     y = np.linspace(-np.pi, np.pi, N)
     z = np.linspace(-np.pi, np.pi, N)
-    X, Y, Z = np.meshgrid(x, y, z)
-    mask = X**2 + Y**2 + Z**2 <= np.pi**2  # Mask for spherical region
+    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+    mask = X**2 + Y**2 + Z**2 <= np.pi**2  # Masque pour la région sphérique
     
-    img = np.zeros_like(X, dtype=float)  # Initialize array for loss values
-    rot_vecs = directions * theta[:, None]  # Combine directions and angles
+    img = np.zeros_like(X, dtype=float)  # Initialiser le tableau pour les valeurs de perte
     
-    # Calculate costs for the sampled rotation vectors
+    # Calculer les coûts pour les vecteurs de rotation échantillonnés
     costs = []
-    manifold = SpecialOrthogonalGroup(3, k=1)
-    
-    for rot_vec in rot_vecs:
+    for rot_vec in rotation_vectors:
         R = torch.tensor(rotation_vector_to_rotation_matrix(rot_vec), dtype=torch.float32, device=device)
         A_rotated = A_ @ R.T
         if distance_type == "energy":
@@ -332,16 +336,28 @@ def generate_energy_landscape(A, B, distance_type, rotation_vectors):
         else:
             raise ValueError(f"Unknown distance type: {distance_type}")
         
-        costs.append(cost.item())  # Append CPU float for interpolation
+        costs.append(cost.item())  # Ajouter le coût CPU float pour l'interpolation
     
-    # Interpolate the costs to the full grid
-    #img = griddata(rot_vecs, np.array(costs), (X, Y, Z), method='linear')
+    costs = np.array(costs)
+    
+    # Interpoler les coûts sur la grille complète
     XYZ = np.stack((X, Y, Z), axis=-1).reshape(-1, 3)
-    img = RBFInterpolator(rot_vecs, np.array(costs), kernel="linear")(XYZ)
+    try:
+        img = RBFInterpolator(rotation_vectors, costs, kernel="linear")(XYZ)
+    except Exception as e:
+        print(f"Interpolation error: {e}")
+        img = np.full((N, N, N), np.nan)
+    
     img = img.reshape(N, N, N)
-    img_sphere = np.where(mask, img, np.nan)  # Restrict to the spherical region
-
-    return img_sphere  # Return as a NumPy array for PyVista
+    img_sphere = np.where(mask, img, np.nan)  # Restreindre à la région sphérique
+    
+    # Vérifier si img_sphere contient des valeurs valides
+    if np.all(np.isnan(img_sphere)):
+        print("Erreur: img_sphere contient uniquement des NaN après interpolation.")
+    else:
+        print("Interpolation réussie avec des valeurs valides dans img_sphere.")
+    
+    return img_sphere  # Retourner en tant que tableau NumPy pour PyVista
 
 
 def rotation_vector_to_point(rot_vec):
@@ -377,24 +393,64 @@ def sample_directions(n_samples, random=False):
         points = np.stack((x, y, z), axis=1)
         return points
 
-def sample_angles(n_samples):
-    theta = np.arccos(1 - 2 * np.random.rand(n_samples))  # Using the correct density
-    return theta
+class UniformAngle(rv_continuous):
+    """Cette distribution d'angles correspond à la distribution de Haar sur SO(3)."""
+    def _pdf(self, x):
+        return (1 - np.cos(x)) / np.pi
+
+# Créer une instance de la distribution
+angle_distribution = UniformAngle(a=0, b=np.pi, name='UniformAngle')
+
+# Générer les points pour l'inversion polynomiale
+x = np.linspace(0, np.pi, 1000)
+cdf = angle_distribution._cdf(x)
+ppf_interpolator = interp1d(cdf, x, bounds_error=False, fill_value=(0, np.pi))
+
+def sample_angles(n_samples, random=False):
+    if random:
+        u = np.random.rand(n_samples)
+        return ppf_interpolator(u)
+    else:
+        t = np.linspace(0, 1, n_samples)
+        return ppf_interpolator(t)
+
+def sample_directions(n_samples, random=False):
+    if random:
+        points = np.random.randn(n_samples, 3)
+        points /= np.linalg.norm(points, axis=1)[:, None]
+        return points
+    else:
+        # Fibonacci sphere
+        points = []
+        phi = np.pi * (np.sqrt(5.) - 1.)  # angle d'or en radians
+        i = np.arange(n_samples)
+        y = 1 - (i / float(n_samples - 1)) * 2  # y va de 1 à -1
+        radius = np.sqrt(1 - y * y)
+        theta = phi * i
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+        points = np.stack((x, y, z), axis=1)
+        return points
 
 def sample_vectors(n_samples, random=False):
     if random:
-        angles = sample_angles(n_samples)
+        angles = sample_angles(n_samples, random=random)
         directions = sample_directions(n_samples, random=random)
         vectors = (angles[:, None] * directions).reshape(-1, 3)
     else:
-        n_angles = int(.5 * (n_samples ** (1/3)))
+        n_angles = int(0.5 * (n_samples ** (1/3)))
         n_directions = n_samples // n_angles
-        angles = sample_angles(n_angles)
-        directions = sample_directions(n_directions)
+        angles = sample_angles(n_angles, random=random)
+        directions = sample_directions(n_directions, random=random)
         angles = angles[:, None, None]
         directions = directions[None, :, :]
         vectors = (angles * directions).reshape(-1, 3)
-    print(vectors.shape)
+    
+    # Éviter les vecteurs nuls
+    norms = np.linalg.norm(vectors, axis=1)
+    non_zero = norms > 1e-6
+    vectors = vectors[non_zero]
+    print(f"Sampled vectors shape (non-zero): {vectors.shape}")
     return vectors
 
 
@@ -402,79 +458,115 @@ def sample_vectors(n_samples, random=False):
 def visualize_energy_landscape(img_sphere, intermediate_rotation_vectors, N, save_path):
     grid = pv.ImageData(
         dimensions=img_sphere.shape,
-        origin=(-np.pi, -np.pi, -np.pi),  # Center the origin at the middle of the sphere
+        origin=(-np.pi, -np.pi, -np.pi),  # Centrer l'origine au milieu de la sphère
         spacing=(2 * np.pi / (N - 1), 2 * np.pi / (N - 1), 2 * np.pi / (N - 1)),
     )
     grid.point_data["img"] = img_sphere.flatten(order="F")
-    pl = pv.Plotter(off_screen=True)  # Use off_screen=True to allow screenshots without opening a window
+    pl = pv.Plotter(off_screen=True)  # Utiliser off_screen=True pour permettre les captures d'écran sans ouvrir de fenêtre
     
-    vmax = np.nanmax(img_sphere)
-    vmin = np.nanmin(img_sphere)
-    contours = grid.contour(
-        isosurfaces=np.linspace(vmax, vmin, 11), scalars="img", method="flying_edges"
-    )
-    contours.compute_normals(inplace=True)
+    # Gestion des valeurs NaN
+    if np.all(np.isnan(img_sphere)):
+        print("Erreur: img_sphere contient uniquement des NaN. Skipping visualization.")
+        pl.close()
+        return
+    
+    # Calculer les contours
+    try:
+        vmax = np.nanmax(img_sphere)
+        vmin = np.nanmin(img_sphere)
+        
+        contours = grid.contour(
+            isosurfaces=np.linspace(vmin, vmax, 11),
+            scalars="img",
+            method="flying_edges"
+        )
+        
+        # Vérifier si les contours contiennent des polygones
+        if contours.n_cells == 0:
+            raise ValueError("Aucun contour valide trouvé.")
+        
+        # Calculer les normales uniquement si les contours sont valides
+        try:
+            contours.compute_normals(inplace=True)
+        except TypeError as te:
+            print(f"Erreur lors de la computation des normales: {te}")
+            contours = None
+        
+        if contours is not None:
+            # Ajouter les contours au Plotter
+            pl.add_mesh(
+                contours,
+                opacity=0.1,
+                cmap="RdBu",
+                ambient=0.2,
+                diffuse=1,
+                interpolation="gouraud",
+                show_scalar_bar=False,
+            )
+        
+    except Exception as e:
+        print(f"Erreur lors de la création des contours: {e}")
+        contours = None
+    
+    # Créer la surface sphérique
     sphere_surface = pv.Sphere(
-        center=(0, 0, 0), radius=np.pi, theta_resolution=100, phi_resolution=100
-    )
-    pl.add_mesh(
-        contours,
-        opacity=0.1,  # Adjusted opacity for better contrast
-        cmap="RdBu",
-        ambient=0.2,
-        diffuse=1,
-        interpolation="gouraud",
-        show_scalar_bar=True,
-        scalar_bar_args=dict(vertical=True),
+        center=(0, 0, 0),
+        radius=np.pi,
+        theta_resolution=100,
+        phi_resolution=100
     )
     pl.add_mesh(
         sphere_surface,
         color="black",
-        opacity=0.1,  # Adjusted opacity for better contrast
+        opacity=0.1,
         culling="front",
         interpolation="pbr",
         roughness=1,
     )
+    
+    # Ajouter les étapes d'optimisation
     num_rotations = len(intermediate_rotation_vectors)
-    colormap = plt.get_cmap("viridis")  # Use a high-contrast colormap
-
-    # Create a VTK lookup table from the colormap
-    lookup_table = vtk.vtkLookupTable()
-    lookup_table.SetNumberOfTableValues(num_rotations)
-    lookup_table.SetRange(1, num_rotations)  # Set the correct range from 1 to num_rotations
-    lookup_table.Build()
-
-    for i in range(num_rotations):
-        color = colormap(i / (num_rotations - 1))[:3]
-        lookup_table.SetTableValue(i, *color, 1.0)  # Add color to the lookup table
-
-    # Create a grid for spheres with color data based on the optimization steps
-    points = np.array(intermediate_rotation_vectors)
-    scalars = np.arange(1, num_rotations + 1)  # Starting from 1
-
-    # Add spheres with scalar colors
-    for i, point in enumerate(points):
-        scalar_value = scalars[i]
-        color = colormap((scalar_value - 1) / (num_rotations - 1))[:3]  # Get RGB values from colormap
-        sphere = pv.Sphere(radius=0.1, center=point)
-        pl.add_mesh(sphere, color=color, opacity=1.0)
+    if num_rotations > 0:
+        colormap = plt.get_cmap("viridis")
+        points = np.array(intermediate_rotation_vectors)
         
-        if i < num_rotations - 1:
-            next_point = points[i + 1]
-            line = pv.Line(point, next_point)
-            pl.add_mesh(line, color="black")
-
-    # Add scalar bar
-    scalar_bar = pl.add_scalar_bar(title="Optimization Step", vertical=True, n_labels=5)
-    scalar_bar.SetLookupTable(lookup_table)
-
+        for i, point in enumerate(points):
+            color = colormap(i / max(num_rotations - 1, 1))[:3]
+            sphere = pv.Sphere(radius=0.1, center=point)
+            pl.add_mesh(sphere, color=color, opacity=1.0)
+            
+            if i < num_rotations - 1:
+                next_point = points[i + 1]
+                line = pv.Line(point, next_point)
+                pl.add_mesh(line, color="black")
+    else:
+        print("Aucune étape d'optimisation à visualiser.")
+    
+    # Ajouter la barre scalaire
+    scalar_bar_args = {
+        "title": "Optimization Step",
+        "vertical": True,
+        "position_x": 0.8,
+        "position_y": 0.1,
+        "height": 0.8,
+        "width": 0.03,
+        "fmt": "%.0f",
+    }
+    pl.add_scalar_bar(**scalar_bar_args)
+    
+    # Améliorer la visualisation
     pl.enable_ssao(radius=15, bias=0.5)
     pl.enable_anti_aliasing("ssaa")
     pl.camera.zoom(1.1)
-
-    # Save screenshot
-    pl.screenshot(save_path)  # This will work with off_screen=True
-    pl.show()  # Optional, only if you want to render onscreen if off_screen=False
+    pl.hide_axes()
+    
+    # Sauvegarder la capture d'écran
+    try:
+        pl.screenshot(save_path)
+        print(f"Snapshot saved as {save_path}")
+    except Exception as e:
+        print(f"Erreur lors de la sauvegarde du snapshot: {e}")
+    pl.close()
 
 
 
@@ -834,8 +926,8 @@ def create_energy_landscape_video(img_sphere, intermediate_rotation_vectors, N, 
 
 if __name__ == "__main__":
     # Set experiment parameters
-    experience_index = 44  # Update as needed
-    distance_type = "sinkhorn"  # Options: 'energy', 'sinkhorn', 'gaussian'
+    experience_index = 45  # Update as needed
+    distance_type = "energy"  # Options: 'energy', 'sinkhorn', 'gaussian'
     epsilon = 0.1  # Epsilon value for Sinkhorn or Gaussian distances
     optimizer_names = ["ConjugateGradient"]
 
@@ -847,12 +939,22 @@ if __name__ == "__main__":
 
     # Generate rotation vectors for the energy landscape
     n_samples = 2000
-    rotation_vectors = sample_vectors(n_samples, random=True)
+    rotation_vectors = sample_vectors(n_samples, random=False)
+    print(f"Sampled vectors shape (non-zero): {rotation_vectors.shape}")
+
 
     # Generate energy landscape and create a rotating video
-    img_sphere = generate_energy_landscape(
-        A.numpy(), B.numpy(), distance_type, rotation_vectors
-    )
+    try:
+        img_sphere = generate_energy_landscape(
+            A.cpu().numpy(),
+            B.cpu().numpy(),
+            distance_type,
+            rotation_vectors
+        )
+    except ValueError as ve:
+        print(f"Erreur lors de la génération du paysage énergétique: {ve}")
+        img_sphere = np.full((150, 150, 150), np.nan)
+
     results_dir = f"results/exp{experience_index}"
     os.makedirs(results_dir, exist_ok=True)
     video_filename = f"{results_dir}/energy_landscape_{distance_type}_exp{experience_index}.mp4"
@@ -873,7 +975,15 @@ if __name__ == "__main__":
         loss_plot_filename = f"{results_dir}/loss_{optimizer_name}_{distance_type}_epsilon{epsilon}.png"
         save_loss_plot(losses, filename=loss_plot_filename)
         snapshot_filename = f"{results_dir}/snapshot_{optimizer_name}_{distance_type}_epsilon{epsilon}.png"
-        visualize_energy_landscape(img_sphere, rotation_vecs, N=150, save_path=snapshot_filename)
+        if not np.all(np.isnan(img_sphere)):
+            visualize_energy_landscape(
+                img_sphere,
+                rotation_vecs,
+                N=150,
+                save_path=snapshot_filename
+        )
+    else:
+        print("Skipping visualization due to invalid img_sphere data.")
         visualize_energy_landscape2(
             img_sphere=img_sphere,
             intermediate_rotation_vectors=rotation_vecs,
